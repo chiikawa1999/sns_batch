@@ -436,6 +436,8 @@ def _x_create_tweet(text, bearer=None):
 # ====== 実行 ======
 def main():
     t0 = time.time()
+    # 安全のため先に初期化
+    t1 = t2 = t3 = t4 = t5 = None
 
     # 実行日 9:00 → 翌日 9:00（JST）
     today = datetime.now(JST).date()
@@ -460,6 +462,8 @@ def main():
 
     # 3) appdetails
     details_map = steam_appdetails_batch(target_appids, cc="jp", lang="japanese") if target_appids else {}
+    if target_appids:
+        t3 = time.time()
 
     # 4) 日本価格のある game のみ
     prelim, seen = [], set()
@@ -494,11 +498,12 @@ def main():
         for itad_id, appid in id2appid.items():
             if appid == d["appid"] and itad_id in itad_expiry_map:
                 d["expiry_jst"] = itad_expiry_map[itad_id]; break
-    t4 = time.time()
+    if target_appids:
+        t4 = time.time()
 
     # 5) 日本語レビュー >= 10
     appids_for_reviews = [p["appid"] for p in prelim]
-    jp_map = fetch_jp_reviews_parallel(appids_for_reviews)
+    jp_map = fetch_jp_reviews_parallel(appids_for_reviews) if appids_for_reviews else {}
     rows = []
     for item in prelim:
         n = jp_map.get(item["appid"], 0)
@@ -508,11 +513,20 @@ def main():
 
     def expiry_key(dt): return (0, dt.timestamp()) if dt else (1, float("inf"))
     rows.sort(key=lambda x: (-x.get("reviews_jp", 0), -x["off"], expiry_key(x["expiry_jst"]), x["final"], x["name"]))
-    t5 = time.time()
+    if target_appids:
+        t5 = time.time()
 
-    log(f"PROFILE deals:{t1-t0:.1f}s map:{t2-t1:.1f}s appdetails:{t3-t2:.1f}s prelim+expiry:{t4-t3:.1f}s jp_reviews:{t5-t4:.1f}s")
+    # <-- ここが修正ポイント（“定義済みだけ”でログを作る）
+    profile_parts = []
+    if t1 is not None: profile_parts.append(f"deals:{t1 - t0:.1f}s")
+    if t2 is not None: profile_parts.append(f"map:{t2 - t1:.1f}s")
+    if t3 is not None: profile_parts.append(f"appdetails:{t3 - t2:.1f}s")
+    if t4 is not None: profile_parts.append(f"prelim+expiry:{t4 - t3:.1f}s" if t3 is not None else "prelim+expiry:NA")
+    if t5 is not None: profile_parts.append(f"jp_reviews:{t5 - t4:.1f}s" if t4 is not None else "jp_reviews:NA")
+    if profile_parts:
+        log("PROFILE " + " ".join(profile_parts))
 
-    # 6) 1ツイート整形
+    # 6) 1ツイート整形（以下は従来どおり）
     lines = [head1, head2, ""]
     if not rows:
         if not deals:
@@ -523,7 +537,7 @@ def main():
         for r in rows:
             lines.extend(compose_item_lines(r))
             lines.append("")
-    lines.append(HASHTAG)
+    lines.append("#Steamセール")
     text = "\n".join(lines)
 
     if not POST_TO_X:
@@ -538,3 +552,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
