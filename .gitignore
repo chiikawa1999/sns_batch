@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local token file (ローカル運用用。GitHub上には不要)
+itad_x_tokens.json
+
+# Actions で使う一時ファイル
+new_refresh_token.txt
+
+# OSゴミ
+.DS_Store
+Thumbs.db
