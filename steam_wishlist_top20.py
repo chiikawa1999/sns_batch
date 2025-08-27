@@ -224,10 +224,21 @@ def main():
     # 3) 人気順でソート → 上位N
     rows = sorted(prelim, key=lambda x: x["rank"])[:TOP_N]
 
-    # 4) ツイート本文作成
-    head1 = f"🔜 未発売 × ウィッシュリストTop{TOP_N}"
-    head2 = f"（{today.strftime('%m/%d')} 現在 / JST）"
-    lines = [head1, head2, ""]
+    # 4) ツイート本文作成（★入りバナー／自動幅調整）
+    today_str = today.strftime("%m/%d")
+    title_line = f"   🔜 未発売 × ウィッシュリストTop{TOP_N}"
+    date_line  = f"（{today_str} 現在 / JST）"
+    
+    center = " ★ 🎮 Steam情報局 ★ "
+    inner_width = max(len(title_line), len(date_line))
+    bar_total   = max(inner_width - len(center), 0)
+    bar_left    = bar_total // 2
+    bar_right   = bar_total - bar_left
+    
+    header_top = "╔" + ("═" * bar_left) + center + ("═" * bar_right) + "╗"
+    header_bot = "╚" + ("═" * (bar_left + len(center) + bar_right)) + "╝"
+    
+    lines = [header_top, title_line, date_line, header_bot, ""]
 
     medals = ["🥇", "🥈", "🥉"]
 
@@ -261,6 +272,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
