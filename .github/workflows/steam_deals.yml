@@ -1,8 +1,6 @@
 name: Steam Deals to X (daily)
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # 5分おき（GitHubはUTCで解釈）
   workflow_dispatch:
 
 jobs:
