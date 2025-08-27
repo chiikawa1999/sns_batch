@@ -209,13 +209,13 @@ def main():
         name = d.get("name") or f"App {aid}"
         release_str = fmt_date_jp(rd.get("date") or "TBA")
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
-        pubs = [p for p in (d.get("publishers") or []) if p]
+        devs = [p for p in (d.get("developers") or []) if p]   # ★ publishers→developers に変更
         prelim.append({
             "appid": aid,
             "name": name,
             "release_str": release_str,
             "genres": genres,
-            "publishers": pubs,
+            "developers": devs,   # ★ キー名も developers に
             "rank": rank_index.get(aid, 10**9),
         })
 
@@ -240,9 +240,9 @@ def main():
         lines.append(title_line)
         lines.append(f"🗓 発売予定: {e.get('release_str') or 'TBA'}")
         genres_txt = ", ".join(e.get("genres", [])[:3]) if e.get("genres") else "不明"
-        pubs_txt = ", ".join(e.get("publishers", [])[:2]) if e.get("publishers") else "不明"
+        devs_txt = ", ".join(e.get("developers", [])[:2]) if e.get("developers") else "不明"  # ★ developers 表示
         lines.append(f"🏷 ジャンル: {genres_txt}")
-        lines.append(f"🏢 発売元: {pubs_txt}")
+        lines.append(f"👨‍💻 開発元: {devs_txt}")  # ★ ラベルも「開発元」に変更
         lines.append(f"🔗 https://store.steampowered.com/app/{e['appid']}/")
         lines.append("")
 
@@ -261,3 +261,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
