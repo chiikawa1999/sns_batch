@@ -1,0 +1,62 @@
+name: Steam Wishlist Top20 (daily)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  show-times:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show event and time (UTC & JST)
+        run: |
+          echo "event_name=${{ github.event_name }}"   # schedule / workflow_dispatch など
+          echo "UTC : $(date -u '+%Y-%m-%d %H:%M:%S')"
+          TZ=Asia/Tokyo date '+JST : %Y-%m-%d %H:%M:%S'
+      - name: Repo / Ref
+        run: |
+          echo "repository=${{ github.repository }}"
+          echo "ref=${{ github.ref }}"
+
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run script (post to X)
+        env:
+          X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+          X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
+          X_REDIRECT_URI: ${{ secrets.X_REDIRECT_URI }}
+          # 初回はここに最新の refresh_token を入れておく。以後は自動で更新
+          X_REFRESH_TOKEN: ${{ secrets.X_REFRESH_TOKEN }}
+          # Python が新RTを書き出す先（スクリプトがここに出力）
+          GHA_NEW_RT_PATH: new_refresh_token.txt
+        run: |
+          python steam_wishlist_top20.py
+          echo "---- Script finished ----"
+          if [ -s new_refresh_token.txt ]; then
+            echo "New refresh_token detected."
+          else
+            echo "No refresh_token rotation."
+          fi
+
+      # ★ 新しい RT が出ていたら Secrets を自動更新（Deals版と同じ流れ）
+      - name: Update X_REFRESH_TOKEN secret if rotated
+        if: success() && hashFiles('new_refresh_token.txt') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # repo 権限付き PAT (classic)
+        run: |
+          NEW_RT="$(cat new_refresh_token.txt)"
+          gh secret set X_REFRESH_TOKEN --repo "$GITHUB_REPOSITORY" --body "$NEW_RT"
+          echo "GitHub Secret X_REFRESH_TOKEN updated."
