@@ -246,17 +246,21 @@ def main():
             continue  # 未発売のみ
         name = d.get("name") or f"App {aid}"
 
-        # --- 発売日の決定（ズレ対策：確定日は常に公式文字列を優先） ---
+        # --- 発売日の決定（ズレ対策） ---
         raw_date = (rd.get("date") or "").strip()
 
-        if is_concrete_date_string(raw_date):
-            # 公式のローカライズ済み“確定日”をそのまま採用（例: 2025年10月31日 / Oct 31, 2025）
+        # 日本語の確定日（YYYY年M月D日）が取れているときはそれを最優先
+        if ("年" in raw_date and "月" in raw_date and "日" in raw_date):
             release_str = raw_date
         else:
-            # 具体日が無ければ、検索HTMLのUTC epoch→JSTで補完
+            # 英語表記など日本語でない場合は、epoch(JST変換)を優先
             ts_val = relmap.get(aid)
-            release_str = fmt_from_epoch_jst(ts_val) if ts_val else (raw_date or "TBA")
-        # -------------------------------------------------------------
+            if ts_val:
+                release_str = fmt_from_epoch_jst(ts_val)  # 例: 2025年10月31日
+            else:
+                # epochが無いときだけ、英語の生文字やTBA等をそのまま表示
+                release_str = fmt_date_jp(raw_date or "TBA")
+        # -------------------------------
 
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
         devs = [p for p in (d.get("developers") or []) if p]
@@ -312,4 +316,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
