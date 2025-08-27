@@ -246,39 +246,17 @@ def main():
             continue  # 未発売のみ
         name = d.get("name") or f"App {aid}"
 
-        # --- 発売日の決定（ズレ対策） ---
+        # --- 発売日の決定（ズレ対策：確定日は常に公式文字列を優先） ---
         raw_date = (rd.get("date") or "").strip()
-        concrete_str = is_concrete_date_string(raw_date)
-        epoch_str = None
-        if aid in relmap and relmap[aid] > 0:
-            epoch_str = fmt_from_epoch_jst(relmap[aid])
 
-        # 両方具体日なら「遅い方（最大日）」を採用。片方だけ具体ならそれを採用。
-        def to_date_obj(jp: str):
-            if not jp: return None
-            m = re.match(r'(\d{4})年(\d{2})月(\d{2})日', jp)
-            if not m: return None
-            y, mth, dday = map(int, m.groups())
-            return datetime(y, mth, dday).date()
-
-        chosen = None
-        if concrete_str and epoch_str:
-            d1 = to_date_obj(raw_date if '年' in raw_date else None)
-            d2 = to_date_obj(epoch_str)
-            # raw_dateが英語表記のときは比較できないので epoch を優先
-            if d1 and d2:
-                chosen = epoch_str if d2 >= d1 else raw_date
-            else:
-                chosen = epoch_str
-        elif concrete_str:
-            chosen = raw_date
-        elif epoch_str:
-            chosen = epoch_str
+        if is_concrete_date_string(raw_date):
+            # 公式のローカライズ済み“確定日”をそのまま採用（例: 2025年10月31日 / Oct 31, 2025）
+            release_str = raw_date
         else:
-            chosen = raw_date or "TBA"
-
-        release_str = chosen
-        # -------------------------------
+            # 具体日が無ければ、検索HTMLのUTC epoch→JSTで補完
+            ts_val = relmap.get(aid)
+            release_str = fmt_from_epoch_jst(ts_val) if ts_val else (raw_date or "TBA")
+        # -------------------------------------------------------------
 
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
         devs = [p for p in (d.get("developers") or []) if p]
@@ -334,3 +312,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
