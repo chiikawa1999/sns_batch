@@ -76,6 +76,8 @@ def _get_with_retry(url, params=None, kind="search", timeout=30):
 # ===== Steam: Top Wishlists 無限スクロール =====
 def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE_COUNT, cc="jp", lang="japanese"):
     appids, seen, total_hint = [], set(), None
+    release_ts = {}  # appid -> UTC epoch (int)
+
     for i in range(max_pages):
         start = i * page_count
         params = {
@@ -86,15 +88,27 @@ def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE
         js = r.json()
         html = js.get("results_html", "")
         total_hint = js.get("total_count", total_hint)
-        # data-ds-appid="12345" を抽出
-        for m in re.finditer(r'data-ds-appid="(\d+)"', html):
-            aid = int(m.group(1))
+
+        # パターン1: appid→release-date の順
+        for m in re.finditer(r'data-ds-appid="(\d+)"[^>]*data-ds-release-date="(\d+)"', html):
+            aid = int(m.group(1)); ts = int(m.group(2))
             if aid not in seen:
                 seen.add(aid); appids.append(aid)
+            if ts > 0:
+                release_ts[aid] = ts
+
+        # パターン2: release-date→appid の順（取りこぼし救済）
+        for m in re.finditer(r'data-ds-release-date="(\d+)"[^>]*data-ds-appid="(\d+)"', html):
+            ts = int(m.group(1)); aid = int(m.group(2))
+            if aid not in seen:
+                seen.add(aid); appids.append(aid)
+            if ts > 0:
+                release_ts[aid] = ts
+
         log(f"wishlist page {i+1}: collected={len(appids)} (total~{total_hint})")
         if len(appids) >= TOP_N * 4:  # 未発売で間引く分に余裕
             break
-    return appids
+    return appids, release_ts
 
 # ===== Steam: appdetails =====
 _details_cache = {}
@@ -127,6 +141,13 @@ def steam_appdetails_batch(appids, cc="jp", lang="japanese"):
 def fmt_date_jp(date_str: str) -> str:
     # 例: "27 Aug, 2025" / "TBA" / "Q4 2025" など
     return date_str or "TBA"
+
+def fmt_from_epoch_jst(ts_val: int) -> str:
+    try:
+        dt = datetime.fromtimestamp(int(ts_val), tz=timezone.utc).astimezone(JST)
+        return dt.strftime("%Y/%m/%d")
+    except Exception:
+        return None
 
 def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: max(0, n-1)] + "…"
@@ -192,12 +213,12 @@ def _x_create_tweet(text, bearer=None):
 def main():
     today = datetime.now(JST).date()
 
-    # 1) 人気ウィッシュ順の候補AppIDを取得
-    candidates = fetch_popular_wishlist_appids()
+    # 1) 人気ウィッシュ順の候補AppIDを取得（+ リリースepoch）
+    candidates, relmap = fetch_popular_wishlist_appids()
     if not candidates:
         print("[ERROR] 候補が取得できませんでした", file=sys.stderr); sys.exit(1)
 
-    # 2) appdetailsで未発売（coming_soon）のみ抽出 + ジャンル/発売元
+    # 2) appdetailsで未発売（coming_soon）のみ抽出 + ジャンル/開発元
     details = steam_appdetails_batch(candidates, cc="jp", lang="japanese")
     rank_index = {aid: idx for idx, aid in enumerate(candidates)}  # 並び順保持
     prelim = []
@@ -206,15 +227,24 @@ def main():
         if not rd.get("coming_soon"):
             continue  # 未発売のみ
         name = d.get("name") or f"App {aid}"
-        release_str = fmt_date_jp(rd.get("date") or "TBA")
+
+        # 優先: 検索HTMLのUTC epoch → JST（ズレ防止）
+        release_str = None
+        ts_val = relmap.get(aid)
+        if ts_val:
+            release_str = fmt_from_epoch_jst(ts_val)
+        # フォールバック: appdetails の文字列
+        if not release_str:
+            release_str = fmt_date_jp(rd.get("date") or "TBA")
+
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
-        devs = [p for p in (d.get("developers") or []) if p]   # ★ publishers→developers に変更
+        devs = [p for p in (d.get("developers") or []) if p]
         prelim.append({
             "appid": aid,
             "name": name,
             "release_str": release_str,
             "genres": genres,
-            "developers": devs,   # ★ キー名も developers に
+            "developers": devs,
             "rank": rank_index.get(aid, 10**9),
         })
 
@@ -261,6 +291,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
