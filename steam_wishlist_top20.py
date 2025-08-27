@@ -73,16 +73,9 @@ def _get_with_retry(url, params=None, kind="search", timeout=30):
     r.raise_for_status()
     return r
 
-# ===== Steam: Top Wishlists 無限スクロール（★ ここだけ拡張：epochも取得） =====
+# ===== Steam: Top Wishlists 無限スクロール =====
 def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE_COUNT, cc="jp", lang="japanese"):
-    """
-    Returns:
-      appids: [int, ...]
-      release_ts: {appid:int}  # data-ds-release-date (UTC epoch秒)
-    """
     appids, seen, total_hint = [], set(), None
-    release_ts = {}
-
     for i in range(max_pages):
         start = i * page_count
         params = {
@@ -91,27 +84,17 @@ def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE
         }
         r = _get_with_retry("https://store.steampowered.com/search/results/", params=params, kind="search")
         js = r.json()
-        html = js.get("results_html", "") or ""
+        html = js.get("results_html", "")
         total_hint = js.get("total_count", total_hint)
-
-        # appid 抽出（従来どおり）
+        # data-ds-appid="12345" を抽出
         for m in re.finditer(r'data-ds-appid="(\d+)"', html):
             aid = int(m.group(1))
             if aid not in seen:
                 seen.add(aid); appids.append(aid)
-
-        # release epoch（順不同の両パターン）
-        for m in re.finditer(r'data-ds-appid="(\d+)"[^>]*data-ds-release-date="(\d+)"', html, flags=re.S):
-            aid = int(m.group(1)); ts = int(m.group(2))
-            if ts > 0: release_ts[aid] = ts
-        for m in re.finditer(r'data-ds-release-date="(\d+)"[^>]*data-ds-appid="(\d+)"', html, flags=re.S):
-            ts = int(m.group(1)); aid = int(m.group(2))
-            if ts > 0: release_ts[aid] = ts
-
         log(f"wishlist page {i+1}: collected={len(appids)} (total~{total_hint})")
         if len(appids) >= TOP_N * 4:  # 未発売で間引く分に余裕
             break
-    return appids, release_ts
+    return appids
 
 # ===== Steam: appdetails =====
 _details_cache = {}
@@ -140,32 +123,10 @@ def steam_appdetails_batch(appids, cc="jp", lang="japanese"):
             log(f"appdetails skipped more {len(skipped)-8}...")
     return result
 
-# ===== 整形（★ ここから2関数追加） =====
+# ===== 整形 =====
 def fmt_date_jp(date_str: str) -> str:
+    # 例: "27 Aug, 2025" / "TBA" / "Q4 2025" など
     return date_str or "TBA"
-
-def is_concrete_date_string(s: str) -> bool:
-    """'2025年10月31日' / 'Oct 31, 2025' / '31 Oct, 2025' など確定日か判定"""
-    if not s:
-        return False
-    s = s.strip()
-    # 日本語 'YYYY年M月D日'
-    if ('年' in s and '月' in s and '日' in s):
-        return True
-    # 英語 'Mon DD, YYYY' or 'DD Mon, YYYY'
-    if re.search(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b\s+\d{1,2},?\s+\d{4}', s, re.I):
-        return True
-    if re.search(r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*,?\s+\d{4}', s, re.I):
-        return True
-    return False
-
-def fmt_from_epoch_jst(ts_val: int) -> str:
-    """UTC epoch→JST→日本語日付"""
-    try:
-        dt = datetime.fromtimestamp(int(ts_val), tz=timezone.utc).astimezone(JST)
-        return dt.strftime("%Y年%m月%d日")
-    except Exception:
-        return None
 
 def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: max(0, n-1)] + "…"
@@ -231,12 +192,12 @@ def _x_create_tweet(text, bearer=None):
 def main():
     today = datetime.now(JST).date()
 
-    # 1) 人気ウィッシュ順の候補AppID（+ release epoch）を取得
-    candidates, relmap = fetch_popular_wishlist_appids()
+    # 1) 人気ウィッシュ順の候補AppIDを取得
+    candidates = fetch_popular_wishlist_appids()
     if not candidates:
         print("[ERROR] 候補が取得できませんでした", file=sys.stderr); sys.exit(1)
 
-    # 2) appdetailsで未発売のみ抽出 + ジャンル/開発元
+    # 2) appdetailsで未発売（coming_soon）のみ抽出 + ジャンル/発売元
     details = steam_appdetails_batch(candidates, cc="jp", lang="japanese")
     rank_index = {aid: idx for idx, aid in enumerate(candidates)}  # 並び順保持
     prelim = []
@@ -245,31 +206,15 @@ def main():
         if not rd.get("coming_soon"):
             continue  # 未発売のみ
         name = d.get("name") or f"App {aid}"
-
-        # --- 発売日の決定（ズレ対策） ---
-        raw_date = (rd.get("date") or "").strip()
-
-        # 日本語の確定日（YYYY年M月D日）が取れているときはそれを最優先
-        if ("年" in raw_date and "月" in raw_date and "日" in raw_date):
-            release_str = raw_date
-        else:
-            # 英語表記など日本語でない場合は、epoch(JST変換)を優先
-            ts_val = relmap.get(aid)
-            if ts_val:
-                release_str = fmt_from_epoch_jst(ts_val)  # 例: 2025年10月31日
-            else:
-                # epochが無いときだけ、英語の生文字やTBA等をそのまま表示
-                release_str = fmt_date_jp(raw_date or "TBA")
-        # -------------------------------
-
+        release_str = fmt_date_jp(rd.get("date") or "TBA")
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
-        devs = [p for p in (d.get("developers") or []) if p]
+        devs = [p for p in (d.get("developers") or []) if p]   # ★ publishers→developers に変更
         prelim.append({
             "appid": aid,
             "name": name,
             "release_str": release_str,
             "genres": genres,
-            "developers": devs,
+            "developers": devs,   # ★ キー名も developers に
             "rank": rank_index.get(aid, 10**9),
         })
 
@@ -294,9 +239,9 @@ def main():
         lines.append(title_line)
         lines.append(f"🗓 発売予定: {e.get('release_str') or 'TBA'}")
         genres_txt = ", ".join(e.get("genres", [])[:3]) if e.get("genres") else "不明"
-        devs_txt = ", ".join(e.get("developers", [])[:2]) if e.get("developers") else "不明"
+        devs_txt = ", ".join(e.get("developers", [])[:2]) if e.get("developers") else "不明"  # ★ developers 表示
         lines.append(f"🏷 ジャンル: {genres_txt}")
-        lines.append(f"👨‍💻 開発元: {devs_txt}")
+        lines.append(f"👨‍💻 開発元: {devs_txt}")  # ★ ラベルも「開発元」に変更
         lines.append(f"🔗 https://store.steampowered.com/app/{e['appid']}/")
         lines.append("")
 
@@ -316,5 +261,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
