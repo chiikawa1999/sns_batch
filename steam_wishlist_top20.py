@@ -30,7 +30,6 @@ from urllib3.util.retry import Retry
 # ===== 基本設定 =====
 COUNTRY = "JP"
 JST = timezone(timedelta(hours=9))
-HASHTAG = "#Steamウィッシュ"
 POST_TO_X = True  # Falseで投稿せず標準出力
 
 TOP_N = 20                 # 取得ランキング上位N件
@@ -246,9 +245,10 @@ def main():
         lines.append(f"🔗 https://store.steampowered.com/app/{e['appid']}/")
         lines.append("")
 
-    lines.append(HASHTAG)
+    lines.append("#Steam")
+    lines.append("#ウィッシュリスト")
     text = "\n".join(lines).rstrip()
-
+    
     # 5) 投稿 or プレビュー
     if not POST_TO_X:
         print(text); return
@@ -261,4 +261,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
