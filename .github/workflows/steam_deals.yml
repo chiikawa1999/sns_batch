@@ -2,10 +2,23 @@ name: Steam Deals to X (daily)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # 毎日 0:00 UTC (JST 9:00)
+    - cron: "*/5 * * * *"   # 5分おき（GitHubはUTCで解釈）
   workflow_dispatch:
 
 jobs:
+  show-times:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show event and time (UTC & JST)
+        run: |
+          echo "event_name=${{ github.event_name }}"   # schedule / workflow_dispatch など
+          echo "UTC : $(date -u '+%Y-%m-%d %H:%M:%S')"
+          TZ=Asia/Tokyo date '+JST : %Y-%m-%d %H:%M:%S'
+      - name: Repo / Ref
+        run: |
+          echo "repository=${{ github.repository }}"
+          echo "ref=${{ github.ref }}"
+
   run-script:
     runs-on: ubuntu-latest
 
