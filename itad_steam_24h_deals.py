@@ -193,23 +193,27 @@ def _get_with_retry(url, params, max_retry=6, base_wait=2.0, kind="appdetails"):
         if r.status_code == 200:
             return r
 
+        # 400 は即失敗（クエリ不正など）
         if r.status_code == 400:
             err = requests.HTTPError("400 Bad Request"); err.response = r
             raise err
 
-        if r.status_code != 429:
-            http_err = requests.HTTPError(f"{r.status_code} Error"); http_err.response = r
-            raise http_err
+        # 429 または 5xx/Cloudflare系はリトライ
+        if r.status_code in (429, 500, 502, 503, 504, 520, 521, 522, 523, 524):
+            retry_after = getattr(r, "headers", {}).get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else base_wait * (2 ** i)
+            except Exception:
+                wait = base_wait * (2 ** i)
+            extra_backoff = min((STEAM_429_SLEEP_BASE * (i + 1)), STEAM_429_SLEEP_CAP)
+            time.sleep(wait + random.uniform(0.3, 0.9) + extra_backoff)
+            with _throttle_lock:
+                _last_steam_ts[kind] = 0.0
+            continue
 
-        retry_after = getattr(r, "headers", {}).get("Retry-After")
-        try:
-            wait = float(retry_after) if retry_after else base_wait * (2 ** i)
-        except Exception:
-            wait = base_wait * (2 ** i)
-        extra_backoff = min((STEAM_429_SLEEP_BASE * (i + 1)), STEAM_429_SLEEP_CAP)
-        time.sleep(wait + random.uniform(0.3, 0.9) + extra_backoff)
-        with _throttle_lock:
-            _last_steam_ts[kind] = 0.0
+        # 上記以外の 4xx は即失敗
+        http_err = requests.HTTPError(f"{r.status_code} Error"); http_err.response = r
+        raise http_err
 
     time.sleep(max(20.0, extra_backoff))
     _throttle_steam(kind)
@@ -347,11 +351,24 @@ def steam_appdetails_batch(appids, cc="jp", lang="japanese"):
 
 _reviews_cache = {}
 def _fetch_jp_reviews(appid):
-    if appid in _reviews_cache: return appid, _reviews_cache[appid]
+    if appid in _reviews_cache:
+        return appid, _reviews_cache[appid]
     params = {"json": 1, "language": "japanese", "purchase_type": "all"}
-    q = _get_with_retry(f"https://store.steampowered.com/appreviews/{appid}",
-                        params=params, kind="appreviews").json().get("query_summary", {}) or {}
-    n = int(q.get("total_reviews", 0))
+    try:
+        resp = _get_with_retry(
+            f"https://store.steampowered.com/appreviews/{appid}",
+            params=params, kind="appreviews"
+        )
+        try:
+            js = resp.json() or {}
+        except ValueError:
+            # 稀にHTMLや空レスが返る → 0件扱いで継続
+            js = {}
+        q = js.get("query_summary", {}) or {}
+        n = int(q.get("total_reviews", 0))
+    except requests.RequestException:
+        # どうしてもダメなら 0 件として継続（全体を落とさない）
+        n = 0
     _reviews_cache[appid] = n
     return appid, n
 
@@ -360,7 +377,12 @@ def fetch_jp_reviews_parallel(appids):
     with ThreadPoolExecutor(max_workers=JP_REVIEW_WORKERS) as ex:
         futs = [ex.submit(_fetch_jp_reviews, aid) for aid in appids]
         for f in as_completed(futs):
-            aid, n = f.result(); results[aid] = n
+            try:
+                aid, n = f.result()
+            except Exception:
+                # 念のための最終保険
+                continue
+            results[aid] = n
     return results
 
 def fmt_yen(y):
@@ -552,4 +574,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
