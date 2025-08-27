@@ -60,7 +60,10 @@ def _throttle(kind: str):
 
 def _requests_session():
     s = requests.Session()
-    s.headers.update({"User-Agent": "Mozilla/5.0"})
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "ja,en;q=0.9",
+    })
     s.mount("https://", HTTPAdapter(max_retries=Retry(
         total=5, backoff_factor=1.2, status_forcelist=(429, 500, 502, 503, 504)
     )))
@@ -75,39 +78,71 @@ def _get_with_retry(url, params=None, kind="search", timeout=30):
 
 # ===== Steam: Top Wishlists 無限スクロール =====
 def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE_COUNT, cc="jp", lang="japanese"):
+    """
+    Returns:
+      appids: [int, ...]         取得順 = 人気順の近似
+      release_ts: {appid:int}    data-ds-release-date (UTC epoch秒) があれば
+    """
     appids, seen, total_hint = [], set(), None
-    release_ts = {}  # appid -> UTC epoch (int)
+    release_ts = {}
 
     for i in range(max_pages):
         start = i * page_count
         params = {
-            "start": start, "count": page_count,
-            "filter": "popularwishlist", "cc": cc, "l": lang, "infinite": 1,
+            "start": start,
+            "count": page_count,
+            "filter": "popularwishlist",
+            "cc": cc,
+            "l": lang,
+            "infinite": 1,
+            "ndl": 1,  # new design lite（安定化のため）
         }
         r = _get_with_retry("https://store.steampowered.com/search/results/", params=params, kind="search")
         js = r.json()
-        html = js.get("results_html", "")
+        html = js.get("results_html", "") or ""
         total_hint = js.get("total_count", total_hint)
 
-        # パターン1: appid→release-date の順
-        for m in re.finditer(r'data-ds-appid="(\d+)"[^>]*data-ds-release-date="(\d+)"', html):
-            aid = int(m.group(1)); ts = int(m.group(2))
+        # 1) <a href="/app/123456/..."> or full URL から appid を拾う（最も安定）
+        for m in re.finditer(r'href="(?:https?://store\.steampowered\.com)?/app/(\d+)', html):
+            aid = int(m.group(1))
             if aid not in seen:
-                seen.add(aid); appids.append(aid)
+                seen.add(aid)
+                appids.append(aid)
+
+        # 2) 可能なら同一タグにある release epoch を同時取得（順不同の両パターン）
+        for m in re.finditer(r'data-ds-appid="(\d+)"[^>]*data-ds-release-date="(\d+)"', html, flags=re.S):
+            aid = int(m.group(1)); ts = int(m.group(2))
+            if ts > 0:
+                release_ts[aid] = ts
+        for m in re.finditer(r'data-ds-release-date="(\d+)"[^>]*data-ds-appid="(\d+)"', html, flags=re.S):
+            ts = int(m.group(1)); aid = int(m.group(2))
             if ts > 0:
                 release_ts[aid] = ts
 
-        # パターン2: release-date→appid の順（取りこぼし救済）
-        for m in re.finditer(r'data-ds-release-date="(\d+)"[^>]*data-ds-appid="(\d+)"', html):
-            ts = int(m.group(1)); aid = int(m.group(2))
-            if aid not in seen:
-                seen.add(aid); appids.append(aid)
-            if ts > 0:
-                release_ts[aid] = ts
+        # 3) それでも epoch が欠ける app は、行ブロックから近傍検索で補完（ゆるく200文字以内）
+        for aid in appids[-(page_count+10):]:  # 直近に追加された分を中心に
+            if aid in release_ts:
+                continue
+            # aid が近傍にある data-ds-release-date を拾う
+            pattern = rf'(?:app/{aid}[^<]{{0,200}}data-ds-release-date="(\d+)"|data-ds-release-date="(\d+)"[^<]{{0,200}}app/{aid})'
+            m = re.search(pattern, html, flags=re.S)
+            if m:
+                ts = m.group(1) or m.group(2)
+                try:
+                    ts = int(ts)
+                    if ts > 0:
+                        release_ts[aid] = ts
+                except Exception:
+                    pass
 
         log(f"wishlist page {i+1}: collected={len(appids)} (total~{total_hint})")
-        if len(appids) >= TOP_N * 4:  # 未発売で間引く分に余裕
+
+        if len(appids) >= TOP_N * 4:  # 未発売で間引く分に余裕を持つ
             break
+
+        # ほんの少し待つ（サーバ優しめ）
+        time.sleep(0.4)
+
     return appids, release_ts
 
 # ===== Steam: appdetails =====
@@ -291,6 +326,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
