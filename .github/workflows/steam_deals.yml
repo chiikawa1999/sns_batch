@@ -2,7 +2,7 @@ name: Steam Deals to X (daily)
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 毎日 0:00 UTC (JST 9:00)
+    - cron: '*/5 * * * *'   # 毎日 0:00 UTC (JST 9:00)
   workflow_dispatch:
 
 jobs:
