@@ -140,7 +140,7 @@ def steam_appdetails_batch(appids, cc="jp", lang="japanese"):
             log(f"appdetails skipped more {len(skipped)-8}...")
     return result
 
-# ===== 整形（★ 発売日ズレ対策のためのヘルパー追加） =====
+# ===== 整形（★ 既存ヘルパーは残すが未使用） =====
 def fmt_date_jp(date_str: str) -> str:
     # 例: "27 Aug, 2025" / "TBA" / "Q4 2025" など
     return date_str or "TBA"
@@ -247,20 +247,38 @@ def main():
             continue  # 未発売のみ
         name = d.get("name") or f"App {aid}"
 
-        # --- 発売日の決定（ズレ対策） ---
+        # --- 発売日の決定（シンプル版：Steam API文字列→JSTで"YYYY年MM月DD日"） ---
         raw_date = (rd.get("date") or "").strip()
+        release_str = "TBA"
+        if raw_date:
+            fmt_done = False
 
-        # 日本語の“確定日”があるなら最優先（例: 2025年10月31日）
-        if ("年" in raw_date and "月" in raw_date and "日" in raw_date):
-            release_str = raw_date
-        else:
-            # 日本語でない（英語やTBA/Q4など）の場合は、検索HTMLの UTC epoch→JST を優先して補完
-            ts_val = relmap.get(aid) if 'relmap' in locals() else None
-            if ts_val:
-                release_str = fmt_from_epoch_jst(ts_val) or (raw_date or "TBA")
-            else:
-                release_str = raw_date or "TBA"
-        # -------------------------------
+            # 日本語 "YYYY年M月D日"
+            if ("年" in raw_date and "月" in raw_date and "日" in raw_date):
+                m = re.search(r'(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日', raw_date)
+                if m:
+                    y, mo, da = map(int, m.groups())
+                    # Steamのdateは日付のみ（時刻なし）なので、その日付のJST 00:00として扱う
+                    dt = datetime(y, mo, da, 0, 0, 0, tzinfo=JST)
+                    release_str = dt.strftime("%Y年%m月%d日")
+                    fmt_done = True
+
+            # 英語 "31 Oct, 2025" / "Oct 31, 2025"
+            if not fmt_done:
+                for pat in ("%d %b, %Y", "%b %d, %Y"):
+                    try:
+                        dt_utc = datetime.strptime(raw_date, pat).replace(tzinfo=timezone.utc)
+                        dt_jst = dt_utc.astimezone(JST)
+                        release_str = dt_jst.strftime("%Y年%m月%d日")
+                        fmt_done = True
+                        break
+                    except Exception:
+                        pass
+
+            # うまく解釈できない形式（TBA / Q4など）はそのまま出力
+            if not fmt_done:
+                release_str = raw_date
+        # -------------------------------------------------------------
 
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
         devs = [p for p in (d.get("developers") or []) if p]   # ★ publishers→developers に変更済み
