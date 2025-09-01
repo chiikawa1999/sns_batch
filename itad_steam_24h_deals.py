@@ -221,7 +221,7 @@ def _get_with_retry(url, params, max_retry=6, base_wait=2.0, kind="appdetails"):
     r.raise_for_status()
     return r
 
-# ====== ITAD呼び出しと処理（あなたのベースどおり） ======
+# ====== ITAD呼び出しと処理 ======
 def get_with_key(url, params=None):
     params = dict(params or {}); params["key"] = ITAD_API_KEY
     r = _session.get(url, params=params, timeout=30)
@@ -445,12 +445,15 @@ def _x_refresh_access_token():
         raise RuntimeError(f"X token refresh失敗 (Basic): 接続エラー {last}")
     raise RuntimeError(f"X token refresh失敗 (Basic, 5xx継続): {getattr(last,'status_code','N/A')} {getattr(last,'text','')[:300]}")
 
-def _x_create_tweet(text, bearer=None):
+def _x_create_tweet(text, bearer=None, reply_to=None):
     if bearer is None:
         bearer = _x_refresh_access_token()
     url = "https://api.twitter.com/2/tweets"
     headers = {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
-    r = requests.post(url, headers=headers, json={"text": text}, timeout=60)
+    payload = {"text": text}
+    if reply_to:
+        payload["reply"] = {"in_reply_to_tweet_id": str(reply_to)}
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"X投稿失敗 ({r.status_code}): {r.text[:400]}")
     return r.json()["data"]["id"]
@@ -538,7 +541,7 @@ def main():
     if target_appids:
         t5 = time.time()
 
-    # <-- ここが修正ポイント（“定義済みだけ”でログを作る）
+    # <-- プロファイルログ（元のまま）
     profile_parts = []
     if t1 is not None: profile_parts.append(f"deals:{t1 - t0:.1f}s")
     if t2 is not None: profile_parts.append(f"map:{t2 - t1:.1f}s")
@@ -548,27 +551,68 @@ def main():
     if profile_parts:
         log("PROFILE " + " ".join(profile_parts))
 
-    # 6) 1ツイート整形（以下は従来どおり）
-    lines = [head1, head2, ""]
+    # 6) 1ツイート=最大100件、超過はスレッド化（リプ連投）。途中ツイ末尾に「続きます↓」を付与。
     if not rows:
+        # 従来どおり（空の場合）
+        lines = [ "⏰ 本日終了のSteamセールまとめ",
+                  f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
+                  "" ]
         if not deals:
             lines.append("（条件を満たすセールは見つかりませんでした）")
         else:
             lines.append("該当ディールはありましたが、Steam側のappid解決に失敗しました。")
-    else:
-        for r in rows:
+        lines.append("#Steamセール")
+        text_single = "\n".join(lines)
+
+        if not POST_TO_X:
+            print(text_single); return
+
+        try:
+            print("[POST] Xへ投稿を開始します…")
+            tid = _x_create_tweet(text_single)
+            print(f"[POST] 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
+        except Exception as e:
+            print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr); sys.exit(1)
+        return
+
+    # rows がある場合は 100件ずつ分割
+    CHUNK = 100
+    chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
+
+    def build_tweet_text(chunk_rows, is_last):
+        lines = [ "⏰ 本日終了のSteamセールまとめ",
+                  f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
+                  "" ]
+        for r in chunk_rows:
             lines.extend(compose_item_lines(r))
             lines.append("")
-    lines.append("#Steamセール")
-    text = "\n".join(lines)
+        lines.append("#Steamセール")
+        if not is_last:
+            lines.append("続きます↓")
+        return "\n".join(lines)
+
+    texts = [build_tweet_text(ch, is_last=(idx == len(chunks)-1))
+             for idx, ch in enumerate(chunks)]
 
     if not POST_TO_X:
-        print(text); return
+        # プレビュー時は順番に出力
+        for i, t in enumerate(texts, 1):
+            print(f"--- Tweet Part {i}/{len(texts)} ---")
+            print(t)
+        return
 
+    # 投稿：1枚目→以降は前ツイートにリプライでスレッド化
     try:
         print("[POST] Xへ投稿を開始します…")
-        tid = _x_create_tweet(text)
-        print(f"[POST] 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
+        bearer = _x_refresh_access_token()
+        first_id = _x_create_tweet(texts[0], bearer=bearer)
+        print(f"[POST] 1/{len(texts)} 完了: tweet_id={first_id}, URL=https://x.com/i/web/status/{first_id}")
+
+        prev_id = first_id
+        for i in range(1, len(texts)):
+            tid = _x_create_tweet(texts[i], bearer=bearer, reply_to=prev_id)
+            print(f"[POST] {i+1}/{len(texts)} 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
+            prev_id = tid
     except Exception as e:
         print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr); sys.exit(1)
 
