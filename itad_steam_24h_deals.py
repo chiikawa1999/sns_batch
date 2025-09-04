@@ -576,7 +576,7 @@ def main():
         return
 
     # rows がある場合は 100件ずつ分割
-    CHUNK = 100
+    CHUNK = 50
     chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
 
     def build_tweet_text(chunk_rows, is_last):
@@ -618,3 +618,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
