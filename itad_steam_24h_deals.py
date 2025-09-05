@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 Steam: 実行日の朝9:00から翌朝9:00（JST）の24hで終了予定のセールを ITAD→Steam 連携で収集し、
-【日本語レビュー10件以上】の作品のみを整形し、必要ならX(旧Twitter)へ1ツイート投稿します。
+【日本語レビュー10件以上】の作品のみを整形し、投稿は「次に到来するJSTの9:00」まで待機してからX(旧Twitter)へ行います。
 （対象はソフト単体 = Steam app のみ。JPストア基準）
 
 準備:
   1) pip install -r requirements.txt
   2) ITAD_API_KEY, X_CLIENT_ID, X_CLIENT_SECRET, X_REDIRECT_URI を設定
   3) 初回のみ X_REFRESH_TOKEN を GitHub Secrets へ設定（ローカル運用なら itad_x_tokens.jsonでも可）
+
+オプション:
+  - 環境変数 DEFER_OFFSET_SEC: 9:00 からの遅延秒（例: 10 を指定すると 9:00:10 に投稿）
 """
 
 import os
@@ -53,10 +56,13 @@ MIN_JP_REVIEWS = 10
 JP_REVIEW_WORKERS = 2
 ITAD_API_BASE = "https://api.isthereanydeal.com"
 
+# 9:00からの遅延秒（微調整用）
+DEFER_OFFSET_SEC = 0
+
 # ログ
 DEBUG = True
 def ts(): return datetime.now(JST).strftime("%H:%M:%S")
-def log(msg): 
+def log(msg):
     if DEBUG: print(f"[{ts()}] {msg}")
 
 # ====== バリデーション ======
@@ -77,10 +83,6 @@ def _token_path():
 
 # ====== refresh_token 読み/書き ======
 def _load_refresh_token():
-    """
-    refresh_token を取得する。
-    優先順: 環境変数 X_REFRESH_TOKEN -> itad_x_tokens.json
-    """
     env_rt = (os.getenv("X_REFRESH_TOKEN") or "").strip()
     if env_rt:
         if DEBUG: log("[TOKEN] Loaded refresh_token from ENV (X_REFRESH_TOKEN)")
@@ -108,14 +110,9 @@ def _load_refresh_token():
         )
 
 def _save_refresh_token(new_rt: str):
-    """
-    新しい refresh_token を itad_x_tokens.json に保存し、
-    もし GHA_NEW_RT_PATH が設定されていればそのファイルにも書き出す（Actions側でSecrets更新に使う）。
-    """
     if not new_rt:
         return
-
-    # (1) ローカル保存（ローカル運用時）
+    # (1) ローカル保存
     try:
         path = _token_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,8 +134,7 @@ def _save_refresh_token(new_rt: str):
                 pass
     except Exception as e:
         if DEBUG: log(f"[TOKEN] local save skipped: {type(e).__name__}: {e}")
-
-    # (2) GitHub Actions 向けの吐き出し
+    # (2) GHA用吐き出し
     if GHA_NEW_RT_PATH:
         try:
             pathlib.Path(GHA_NEW_RT_PATH).write_text(new_rt, encoding="utf-8")
@@ -193,12 +189,10 @@ def _get_with_retry(url, params, max_retry=6, base_wait=2.0, kind="appdetails"):
         if r.status_code == 200:
             return r
 
-        # 400 は即失敗（クエリ不正など）
         if r.status_code == 400:
             err = requests.HTTPError("400 Bad Request"); err.response = r
             raise err
 
-        # 429 または 5xx/Cloudflare系はリトライ
         if r.status_code in (429, 500, 502, 503, 504, 520, 521, 522, 523, 524):
             retry_after = getattr(r, "headers", {}).get("Retry-After")
             try:
@@ -211,7 +205,6 @@ def _get_with_retry(url, params, max_retry=6, base_wait=2.0, kind="appdetails"):
                 _last_steam_ts[kind] = 0.0
             continue
 
-        # 上記以外の 4xx は即失敗
         http_err = requests.HTTPError(f"{r.status_code} Error"); http_err.response = r
         raise http_err
 
@@ -221,7 +214,7 @@ def _get_with_retry(url, params, max_retry=6, base_wait=2.0, kind="appdetails"):
     r.raise_for_status()
     return r
 
-# ====== ITAD呼び出しと処理 ======
+# ====== ITAD呼び出し ======
 def get_with_key(url, params=None):
     params = dict(params or {}); params["key"] = ITAD_API_KEY
     r = _session.get(url, params=params, timeout=30)
@@ -362,12 +355,10 @@ def _fetch_jp_reviews(appid):
         try:
             js = resp.json() or {}
         except ValueError:
-            # 稀にHTMLや空レスが返る → 0件扱いで継続
             js = {}
         q = js.get("query_summary", {}) or {}
         n = int(q.get("total_reviews", 0))
     except requests.RequestException:
-        # どうしてもダメなら 0 件として継続（全体を落とさない）
         n = 0
     _reviews_cache[appid] = n
     return appid, n
@@ -380,7 +371,6 @@ def fetch_jp_reviews_parallel(appids):
             try:
                 aid, n = f.result()
             except Exception:
-                # 念のための最終保険
                 continue
             results[aid] = n
     return results
@@ -399,7 +389,7 @@ def compose_item_lines(entry):
         f"🔗 https://store.steampowered.com/app/{entry['appid']}/",
     ]
 
-# ====== X: refresh_token -> access_token（Confidential/Basic） & 投稿 ======
+# ====== X: token & 投稿 ======
 def _x_refresh_access_token():
     cid = (X_CLIENT_ID or "").strip()
     sec = (X_CLIENT_SECRET or "").strip()
@@ -421,7 +411,7 @@ def _x_refresh_access_token():
     }
 
     last = None
-    for i in range(3):  # 5xx リトライ
+    for i in range(3):
         try:
             r = requests.post(url, data=form, headers=headers, timeout=30)
         except requests.RequestException as e:
@@ -458,13 +448,40 @@ def _x_create_tweet(text, bearer=None, reply_to=None):
         raise RuntimeError(f"X投稿失敗 ({r.status_code}): {r.text[:400]}")
     return r.json()["data"]["id"]
 
+# ====== 待機ユーティリティ ======
+def _next_9am_jst(base_dt: datetime) -> datetime:
+    """base_dt（JST）から見て『次に到来する 9:00 JST』を返す."""
+    nine_today = base_dt.replace(hour=9, minute=0, second=0, microsecond=0)
+    if base_dt < nine_today:
+        target = nine_today
+    else:
+        target = nine_today + timedelta(days=1)
+    if DEFER_OFFSET_SEC:
+        target += timedelta(seconds=max(0, DEFER_OFFSET_SEC))
+    return target
+
+def _sleep_until(target_dt: datetime):
+    """target_dt(JST)まで段階的に待機（分刻み→秒刻みの順でログ出力）"""
+    while True:
+        now = datetime.now(JST)
+        remain = (target_dt - now).total_seconds()
+        if remain <= 0:
+            break
+        if remain > 180:
+            chunk = 60
+        elif remain > 30:
+            chunk = 10
+        else:
+            chunk = 1
+        log(f"[DEFER] 投稿まで {int(remain)} 秒")
+        time.sleep(chunk)
+
 # ====== 実行 ======
 def main():
     t0 = time.time()
-    # 安全のため先に初期化
     t1 = t2 = t3 = t4 = t5 = None
 
-    # 実行日 9:00 → 翌日 9:00（JST）
+    # 「本日9:00 → 翌日9:00（JST）」の窓
     today = datetime.now(JST).date()
     start = datetime(today.year, today.month, today.day, 9, 0, 0, tzinfo=JST)
     end   = start + timedelta(days=1)
@@ -490,7 +507,7 @@ def main():
     if target_appids:
         t3 = time.time()
 
-    # 4) 日本価格のある game のみ
+    # 4) 日本価格のある game のみ抽出
     prelim, seen = [], set()
     for appid in target_appids:
         if appid in seen: continue
@@ -541,7 +558,7 @@ def main():
     if target_appids:
         t5 = time.time()
 
-    # <-- プロファイルログ（元のまま）
+    # プロファイル
     profile_parts = []
     if t1 is not None: profile_parts.append(f"deals:{t1 - t0:.1f}s")
     if t2 is not None: profile_parts.append(f"map:{t2 - t1:.1f}s")
@@ -551,34 +568,7 @@ def main():
     if profile_parts:
         log("PROFILE " + " ".join(profile_parts))
 
-    # 6) 1ツイート=最大100件、超過はスレッド化（リプ連投）。途中ツイ末尾に「続きます↓」を付与。
-    if not rows:
-        # 従来どおり（空の場合）
-        lines = [ "⏰ 本日終了のSteamセールまとめ",
-                  f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
-                  "" ]
-        if not deals:
-            lines.append("（条件を満たすセールは見つかりませんでした）")
-        else:
-            lines.append("該当ディールはありましたが、Steam側のappid解決に失敗しました。")
-        lines.append("#Steamセール")
-        text_single = "\n".join(lines)
-
-        if not POST_TO_X:
-            print(text_single); return
-
-        try:
-            print("[POST] Xへ投稿を開始します…")
-            tid = _x_create_tweet(text_single)
-            print(f"[POST] 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
-        except Exception as e:
-            print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr); sys.exit(1)
-        return
-
-    # rows がある場合は 100件ずつ分割
-    CHUNK = 50
-    chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
-
+    # 6) 投稿テキスト構築（最大50件/ツイ）
     def build_tweet_text(chunk_rows, is_last):
         lines = [ "⏰ 本日終了のSteamセールまとめ",
                   f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
@@ -586,25 +576,44 @@ def main():
         for r in chunk_rows:
             lines.extend(compose_item_lines(r))
             lines.append("")
-        lines.append("#Steamセール")
+        lines.append(HASHTAG)
         if not is_last:
             lines.append("続きます↓")
         return "\n".join(lines)
 
-    texts = [build_tweet_text(ch, is_last=(idx == len(chunks)-1))
-             for idx, ch in enumerate(chunks)]
+    if not rows:
+        lines = [ "⏰ 本日終了のSteamセールまとめ",
+                  f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
+                  "" ]
+        if not deals:
+            lines.append("（条件を満たすセールは見つかりませんでした）")
+        else:
+            lines.append("該当ディールはありましたが、Steam側のappid解決に失敗しました。")
+        lines.append(HASHTAG)
+        texts = ["\n".join(lines)]
+    else:
+        CHUNK = 50
+        chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
+        texts = [build_tweet_text(ch, is_last=(idx == len(chunks)-1))
+                 for idx, ch in enumerate(chunks)]
 
+    # ===== ここから投稿待機ロジック =====
+    target = _next_9am_jst(datetime.now(JST))
+    log(f"[DEFER] 次の投稿ターゲット: {target.strftime('%m/%d %H:%M:%S')} JST")
+    if POST_TO_X:
+        _sleep_until(target)
+
+    # ===== 投稿（待機後に実施） =====
     if not POST_TO_X:
-        # プレビュー時は順番に出力
+        # プレビュー出力
         for i, t in enumerate(texts, 1):
             print(f"--- Tweet Part {i}/{len(texts)} ---")
             print(t)
         return
 
-    # 投稿：1枚目→以降は前ツイートにリプライでスレッド化
     try:
         print("[POST] Xへ投稿を開始します…")
-        bearer = _x_refresh_access_token()
+        bearer = _x_refresh_access_token()  # ※待機後にリフレッシュ（有効性を担保）
         first_id = _x_create_tweet(texts[0], bearer=bearer)
         print(f"[POST] 1/{len(texts)} 完了: tweet_id={first_id}, URL=https://x.com/i/web/status/{first_id}")
 
@@ -618,4 +627,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
