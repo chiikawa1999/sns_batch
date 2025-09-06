@@ -1,18 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 未発売タイトル（coming_soon）のうち、Steam公式検索の「Top Wishlists」順で上位N件を取得し、
-ジャンル（genres）と発売元（publishers）を併記して1ツイートにまとめて投稿（またはプレビュー出力）します。
+ジャンル（genres）と開発元（developers）を併記して1ツイートにまとめて投稿（またはプレビュー出力）します。
 
-- ランキング取得（近似）:
-    https://store.steampowered.com/search/results/?infinite=1&filter=popularwishlist
-- 未発売判定:
-    appdetails.release_date.coming_soon == True
-- 日本向け:
-    cc=jp / l=japanese
+投稿は「次に到来する JST の 18:00」まで待機してから実行します（固定）。
 
 必要な環境変数:
   X_CLIENT_ID, X_CLIENT_SECRET, X_REDIRECT_URI, （初回のみ）X_REFRESH_TOKEN
-  （任意）DEFER_OFFSET_SEC … 9:00からの遅延秒（例: 10 で 9:00:10 に投稿）
 
 依存:
   pip install requests python-dateutil
@@ -40,8 +34,8 @@ SEARCH_PAGES = 6           # 最大ページ数（60*6=360件分を候補に）
 STEAM_MIN_INTERVAL = {"appdetails": 1.0, "search": 1.0}
 DEBUG = True
 
-# 9:00からの遅延秒（微調整）。例: 10 → 9:00:10 に投稿
-DEFER_OFFSET_SEC = 0
+# 投稿時刻（JST固定 18:00）
+TARGET_HOUR_FIXED = 18
 
 # X OAuth2 Confidential Client 情報
 X_CLIENT_ID = os.getenv("X_CLIENT_ID") or "YOUR_X_CLIENT_ID"
@@ -78,17 +72,11 @@ def _get_with_retry(url, params=None, kind="search", timeout=30):
     r.raise_for_status()
     return r
 
-# ===== 投稿待機ユーティリティ =====
-def _next_9am_jst(base_dt: datetime) -> datetime:
-    """base_dt（JST）から見て『次に到来する 9:00 JST』を返す。"""
-    nine_today = base_dt.replace(hour=9, minute=0, second=0, microsecond=0)
-    if base_dt < nine_today:
-        target = nine_today
-    else:
-        target = nine_today + timedelta(days=1)
-    if DEFER_OFFSET_SEC:
-        target += timedelta(seconds=max(0, DEFER_OFFSET_SEC))
-    return target
+# ===== 投稿待機ユーティリティ（18:00固定） =====
+def _next_18_jst(base_dt: datetime) -> datetime:
+    """base_dt（JST）から見て『次に到来する 18:00 JST』を返す。"""
+    target_today = base_dt.replace(hour=TARGET_HOUR_FIXED, minute=0, second=0, microsecond=0)
+    return target_today if base_dt < target_today else target_today + timedelta(days=1)
 
 def _sleep_until(target_dt: datetime):
     """target_dt(JST)まで段階的に待機（分刻み→秒刻みでログ）"""
@@ -173,20 +161,14 @@ def steam_appdetails_batch(appids, cc="jp", lang="japanese"):
             log(f"appdetails skipped more {len(skipped)-8}...")
     return result
 
-# ===== 整形（★ 既存ヘルパーは残すが未使用） =====
+# ===== 整形ヘルパー =====
 def fmt_date_jp(date_str: str) -> str:
-    # 例: "27 Aug, 2025" / "TBA" / "Q4 2025" など
     return date_str or "TBA"
 
 def is_concrete_date_string(s: str) -> bool:
-    """'2025年10月31日' / 'Oct 31, 2025' / '31 Oct, 2025' など“具体日”を判定"""
-    if not s:
-        return False
+    if not s: return False
     s = s.strip()
-    # 日本語 'YYYY年M月D日'
-    if ('年' in s and '月' in s and '日' in s):
-        return True
-    # 英語 'Mon DD, YYYY' or 'DD Mon, YYYY'
+    if ('年' in s and '月' in s and '日' in s): return True
     if re.search(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b\s+\d{1,2},?\s+\d{4}', s, re.I):
         return True
     if re.search(r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*,?\s+\d{4}', s, re.I):
@@ -194,7 +176,6 @@ def is_concrete_date_string(s: str) -> bool:
     return False
 
 def fmt_from_epoch_jst(ts_val: int) -> str:
-    """UTC epoch→JST→日本語 'YYYY年MM月DD日' に変換"""
     try:
         dt = datetime.fromtimestamp(int(ts_val), tz=timezone.utc).astimezone(JST)
         return dt.strftime("%Y年%m月%d日")
@@ -275,7 +256,7 @@ def main():
     if not candidates:
         print("[ERROR] 候補が取得できませんでした", file=sys.stderr); sys.exit(1)
 
-    # 2) appdetailsで未発売（coming_soon）のみ抽出 + ジャンル/発売元
+    # 2) appdetailsで未発売（coming_soon）のみ抽出 + ジャンル/開発元
     details = steam_appdetails_batch(candidates, cc="jp", lang="japanese")
     rank_index = {aid: idx for idx, aid in enumerate(candidates)}  # 並び順保持
     prelim = []
@@ -285,26 +266,21 @@ def main():
             continue  # 未発売のみ
         name = d.get("name") or f"App {aid}"
 
-        # --- 発売日の決定（シンプル版：Steam API文字列→JSTで"YYYY年MM月DD日"） ---
+        # 発売日の表示（Steamの文字列をそのまま/変換して使う）
         raw_date = (rd.get("date") or "").strip()
         release_str = "TBA"
         if raw_date:
             fmt_done = False
-
-            # 日本語 "YYYY年M月D日"
             if ("年" in raw_date and "月" in raw_date and "日" in raw_date):
                 m = re.search(r'(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日', raw_date)
                 if m:
                     y, mo, da = map(int, m.groups())
-                    dt = datetime(y, mo, da, 0, 0, 0, tzinfo=JST)  # 時刻なし→JST 00:00 として扱う
-                    release_str = dt.strftime("%Y年%m月%d日")
+                    dt_jst = datetime(y, mo, da, 0, 0, 0, tzinfo=JST)
+                    release_str = dt_jst.strftime("%Y年%m月%d日")
                     fmt_done = True
-
-            # 英語 "31 Oct, 2025" / "Oct 31, 2025"
             if not fmt_done:
                 for pat in ("%d %b, %Y", "%b %d, %Y"):
                     try:
-                        # 時刻がないためUTC起点→JST変換で日付文字列を安定化
                         dt_utc = datetime.strptime(raw_date, pat).replace(tzinfo=timezone.utc)
                         dt_jst = dt_utc.astimezone(JST)
                         release_str = dt_jst.strftime("%Y年%m月%d日")
@@ -312,14 +288,11 @@ def main():
                         break
                     except Exception:
                         pass
-
-            # うまく解釈できない形式（TBA / Q4など）はそのまま出力
             if not fmt_done:
                 release_str = raw_date
-        # -------------------------------------------------------------
 
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
-        devs = [p for p in (d.get("developers") or []) if p]   # developersを使用
+        devs = [p for p in (d.get("developers") or []) if p]
         prelim.append({
             "appid": aid,
             "name": name,
@@ -356,8 +329,8 @@ def main():
     lines.append("#ウィッシュリスト")
     text = "\n".join(lines).rstrip()
 
-    # ===== 投稿待機（起動時刻に関係なく、次の 9:00 JST まで） =====
-    target = _next_9am_jst(datetime.now(JST))
+    # ===== 投稿待機（起動時刻に関係なく、次の 18:00 JST まで） =====
+    target = _next_18_jst(datetime.now(JST))
     log(f"[DEFER] 次の投稿ターゲット: {target.strftime('%m/%d %H:%M:%S')} JST")
     if POST_TO_X:
         _sleep_until(target)
@@ -367,7 +340,7 @@ def main():
         print(text); return
     try:
         log("[POST] Xへ投稿を開始します…")
-        bearer = _x_refresh_access_token()   # ← 待機後にリフレッシュ
+        bearer = _x_refresh_access_token()   # 待機後にリフレッシュ
         tid = _x_create_tweet(text, bearer=bearer)
         log(f"[POST] 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
     except Exception as e:
