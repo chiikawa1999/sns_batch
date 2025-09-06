@@ -12,6 +12,7 @@
 
 必要な環境変数:
   X_CLIENT_ID, X_CLIENT_SECRET, X_REDIRECT_URI, （初回のみ）X_REFRESH_TOKEN
+  （任意）DEFER_OFFSET_SEC … 9:00からの遅延秒（例: 10 で 9:00:10 に投稿）
 
 依存:
   pip install requests python-dateutil
@@ -39,17 +40,21 @@ SEARCH_PAGES = 6           # 最大ページ数（60*6=360件分を候補に）
 STEAM_MIN_INTERVAL = {"appdetails": 1.0, "search": 1.0}
 DEBUG = True
 
+# 9:00からの遅延秒（微調整）。例: 10 → 9:00:10 に投稿
+DEFER_OFFSET_SEC = 0
+
 # X OAuth2 Confidential Client 情報
 X_CLIENT_ID = os.getenv("X_CLIENT_ID") or "YOUR_X_CLIENT_ID"
 X_CLIENT_SECRET = os.getenv("X_CLIENT_SECRET") or "YOUR_X_CLIENT_SECRET"
 X_REDIRECT_URI = os.getenv("X_REDIRECT_URI") or "http://localhost/callback"
-TOKEN_FILE = "itad_x_tokens.json"             # 既存運用のトークンファイルを流用
+TOKEN_FILE = "itad_x_tokens.json"               # 既存運用のトークンファイルを流用
 GHA_NEW_RT_PATH = os.getenv("GHA_NEW_RT_PATH")  # 例: new_refresh_token.txt
 
 # ===== ユーティリティ =====
 _last_hit = {"appdetails": 0.0, "search": 0.0}
 def ts(): return datetime.now(JST).strftime("%H:%M:%S")
-def log(msg: str): print(f"[{ts()}] {msg}")
+def log(msg: str):
+    if DEBUG: print(f"[{ts()}] {msg}")
 
 def _throttle(kind: str):
     gap = STEAM_MIN_INTERVAL.get(kind, 0)
@@ -72,6 +77,34 @@ def _get_with_retry(url, params=None, kind="search", timeout=30):
     r = s.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r
+
+# ===== 投稿待機ユーティリティ =====
+def _next_9am_jst(base_dt: datetime) -> datetime:
+    """base_dt（JST）から見て『次に到来する 9:00 JST』を返す。"""
+    nine_today = base_dt.replace(hour=9, minute=0, second=0, microsecond=0)
+    if base_dt < nine_today:
+        target = nine_today
+    else:
+        target = nine_today + timedelta(days=1)
+    if DEFER_OFFSET_SEC:
+        target += timedelta(seconds=max(0, DEFER_OFFSET_SEC))
+    return target
+
+def _sleep_until(target_dt: datetime):
+    """target_dt(JST)まで段階的に待機（分刻み→秒刻みでログ）"""
+    while True:
+        now = datetime.now(JST)
+        remain = (target_dt - now).total_seconds()
+        if remain <= 0:
+            break
+        if remain > 180:
+            chunk = 60
+        elif remain > 30:
+            chunk = 10
+        else:
+            chunk = 1
+        log(f"[DEFER] 投稿まで {int(remain)} 秒")
+        time.sleep(chunk)
 
 # ===== Steam: Top Wishlists 無限スクロール（★ 発売日epochも取得） =====
 def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE_COUNT, cc="jp", lang="japanese"):
@@ -102,11 +135,11 @@ def fetch_popular_wishlist_appids(max_pages=SEARCH_PAGES, page_count=SEARCH_PAGE
 
         # release epoch（順不同の両パターンに対応）
         for m in re.finditer(r'data-ds-appid="(\d+)"[^>]*data-ds-release-date="(\d+)"', html, flags=re.S):
-            aid = int(m.group(1)); ts = int(m.group(2))
-            if ts > 0: release_ts[aid] = ts
+            aid = int(m.group(1)); ts_val = int(m.group(2))
+            if ts_val > 0: release_ts[aid] = ts_val
         for m in re.finditer(r'data-ds-release-date="(\d+)"[^>]*data-ds-appid="(\d+)"', html, flags=re.S):
-            ts = int(m.group(1)); aid = int(m.group(2))
-            if ts > 0: release_ts[aid] = ts
+            ts_val = int(m.group(1)); aid = int(m.group(2))
+            if ts_val > 0: release_ts[aid] = ts_val
 
         log(f"wishlist page {i+1}: collected={len(appids)} (total~{total_hint})")
         if len(appids) >= TOP_N * 4:  # 未発売で間引く分に余裕
@@ -177,19 +210,22 @@ def _token_path(): return os.path.join(os.getcwd(), TOKEN_FILE)
 def _load_refresh_token():
     p = _token_path()
     if os.path.exists(p):
-        try: return json.load(open(p,"r",encoding="utf-8")).get("refresh_token")
-        except Exception: pass
+        try:
+            return json.load(open(p, "r", encoding="utf-8")).get("refresh_token")
+        except Exception:
+            pass
     return os.getenv("X_REFRESH_TOKEN") or ""
 
 def _save_refresh_token(new_rt: str):
     if not new_rt: return
     if GHA_NEW_RT_PATH:
         try:
-            with open(GHA_NEW_RT_PATH,"w",encoding="utf-8") as f: f.write(new_rt)
+            with open(GHA_NEW_RT_PATH, "w", encoding="utf-8") as f:
+                f.write(new_rt)
         except Exception:
             pass
     try:
-        with open(_token_path(),"w",encoding="utf-8") as f:
+        with open(_token_path(), "w", encoding="utf-8") as f:
             json.dump({"refresh_token": new_rt}, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
@@ -202,12 +238,13 @@ def _x_refresh_access_token():
         raise RuntimeError("X CLIENT情報が不足しています")
 
     rt = _load_refresh_token()
-    if not rt: raise RuntimeError("X refresh_token がありません")
+    if not rt:
+        raise RuntimeError("X refresh_token がありません")
 
     url = "https://api.twitter.com/2/oauth2/token"
-    form = {"grant_type":"refresh_token","refresh_token":rt,"client_id":cid,"redirect_uri":red}
+    form = {"grant_type": "refresh_token", "refresh_token": rt, "client_id": cid, "redirect_uri": red}
     s = _requests_session()
-    s.headers.update({"Content-Type":"application/x-www-form-urlencoded"})
+    s.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
     r = s.post(url, data=form, auth=(cid, sec), timeout=30)
     if r.status_code == 200:
         js = r.json()
@@ -220,12 +257,13 @@ def _x_refresh_access_token():
     raise RuntimeError(f"X token refresh失敗 ({r.status_code}): {r.text[:200]}")
 
 def _x_create_tweet(text, bearer=None):
-    if bearer is None: bearer = _x_refresh_access_token()
+    if bearer is None:
+        bearer = _x_refresh_access_token()
     url = "https://api.twitter.com/2/tweets"
-    headers = {"Authorization": f"Bearer {bearer}", "Content-Type":"application/json"}
+    headers = {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
     r = requests.post(url, headers=headers, json={"text": text}, timeout=30)
     if r.status_code == 201:
-        return r.json().get("data",{}).get("id")
+        return r.json().get("data", {}).get("id")
     raise RuntimeError(f"X tweet失敗 {r.status_code}: {r.text[:200]}")
 
 # ===== メイン =====
@@ -258,8 +296,7 @@ def main():
                 m = re.search(r'(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日', raw_date)
                 if m:
                     y, mo, da = map(int, m.groups())
-                    # Steamのdateは日付のみ（時刻なし）なので、その日付のJST 00:00として扱う
-                    dt = datetime(y, mo, da, 0, 0, 0, tzinfo=JST)
+                    dt = datetime(y, mo, da, 0, 0, 0, tzinfo=JST)  # 時刻なし→JST 00:00 として扱う
                     release_str = dt.strftime("%Y年%m月%d日")
                     fmt_done = True
 
@@ -267,6 +304,7 @@ def main():
             if not fmt_done:
                 for pat in ("%d %b, %Y", "%b %d, %Y"):
                     try:
+                        # 時刻がないためUTC起点→JST変換で日付文字列を安定化
                         dt_utc = datetime.strptime(raw_date, pat).replace(tzinfo=timezone.utc)
                         dt_jst = dt_utc.astimezone(JST)
                         release_str = dt_jst.strftime("%Y年%m月%d日")
@@ -281,13 +319,13 @@ def main():
         # -------------------------------------------------------------
 
         genres = [g.get("description") for g in (d.get("genres") or []) if g.get("description")]
-        devs = [p for p in (d.get("developers") or []) if p]   # ★ publishers→developers に変更済み
+        devs = [p for p in (d.get("developers") or []) if p]   # developersを使用
         prelim.append({
             "appid": aid,
             "name": name,
             "release_str": release_str,
             "genres": genres,
-            "developers": devs,   # ★ キー名も developers
+            "developers": devs,
             "rank": rank_index.get(aid, 10**9),
         })
 
@@ -303,31 +341,34 @@ def main():
     lines = [head1, head2, ""]
 
     medals = ["🥇", "🥈", "🥉"]
-
     for i, e in enumerate(rows, 1):
-        if i <= 3:
-            title_line = f"{medals[i-1]} 🎮 {e['name']}"
-        else:
-            title_line = f"🎮 {e['name']}"
+        title_line = f"{medals[i-1]} 🎮 {e['name']}" if i <= 3 else f"🎮 {e['name']}"
         lines.append(title_line)
         lines.append(f"🗓 発売予定: {e.get('release_str') or 'TBA'}")
         genres_txt = ", ".join(e.get("genres", [])[:3]) if e.get("genres") else "不明"
-        devs_txt = ", ".join(e.get("developers", [])[:2]) if e.get("developers") else "不明"  # ★ developers 表示
+        devs_txt = ", ".join(e.get("developers", [])[:2]) if e.get("developers") else "不明"
         lines.append(f"🏷 ジャンル: {genres_txt}")
-        lines.append(f"👨‍💻 開発元: {devs_txt}")  # ★ ラベルも「開発元」に変更
+        lines.append(f"👨‍💻 開発元: {devs_txt}")
         lines.append(f"🔗 https://store.steampowered.com/app/{e['appid']}/")
         lines.append("")
 
     lines.append("#Steam")
     lines.append("#ウィッシュリスト")
     text = "\n".join(lines).rstrip()
-    
+
+    # ===== 投稿待機（起動時刻に関係なく、次の 9:00 JST まで） =====
+    target = _next_9am_jst(datetime.now(JST))
+    log(f"[DEFER] 次の投稿ターゲット: {target.strftime('%m/%d %H:%M:%S')} JST")
+    if POST_TO_X:
+        _sleep_until(target)
+
     # 5) 投稿 or プレビュー
     if not POST_TO_X:
         print(text); return
     try:
         log("[POST] Xへ投稿を開始します…")
-        tid = _x_create_tweet(text)
+        bearer = _x_refresh_access_token()   # ← 待機後にリフレッシュ
+        tid = _x_create_tweet(text, bearer=bearer)
         log(f"[POST] 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
     except Exception as e:
         print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr); sys.exit(1)
