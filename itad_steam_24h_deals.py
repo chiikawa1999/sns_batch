@@ -486,7 +486,8 @@ def main():
     start = datetime(today.year, today.month, today.day, 9, 0, 0, tzinfo=JST)
     end   = start + timedelta(days=1)
 
-    head1 = "⏰ 本日終了のSteamセールまとめ"
+    # ★変更: 見出しをTOP20明記に
+    head1 = "⏰ 本日終了のSteamセールまとめ（TOP20・日本語レビュー数順）"
     head2 = f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）"
 
     # 1) deals
@@ -554,9 +555,15 @@ def main():
             rows.append(item)
 
     def expiry_key(dt): return (0, dt.timestamp()) if dt else (1, float("inf"))
+
+    # 既存の並び替え
     rows.sort(key=lambda x: (-x.get("reviews_jp", 0), -x["off"], expiry_key(x["expiry_jst"]), x["final"], x["name"]))
     if target_appids:
         t5 = time.time()
+
+    # ★変更: TOP20件に制限
+    TOP_N = 20
+    rows = rows[:TOP_N]
 
     # プロファイル
     profile_parts = []
@@ -568,11 +575,13 @@ def main():
     if profile_parts:
         log("PROFILE " + " ".join(profile_parts))
 
-    # 6) 投稿テキスト構築（最大50件/ツイ）
+    # 6) 投稿テキスト構築（最大20件/ツイ） ← ★変更: コメント更新
     def build_tweet_text(chunk_rows, is_last):
-        lines = [ "⏰ 本日終了のSteamセールまとめ",
-                  f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
-                  "" ]
+        lines = [ 
+            "⏰ 本日終了のSteamセールまとめ（TOP20・日本語レビュー数順）",  # ★変更: 見出し
+            f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
+            "" 
+        ]
         for r in chunk_rows:
             lines.extend(compose_item_lines(r))
             lines.append("")
@@ -582,9 +591,11 @@ def main():
         return "\n".join(lines)
 
     if not rows:
-        lines = [ "⏰ 本日終了のSteamセールまとめ",
-                  f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
-                  "" ]
+        lines = [ 
+            "⏰ 本日終了のSteamセールまとめ（TOP20・日本語レビュー数順）",  # ★変更: 見出し
+            f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
+            "" 
+        ]
         if not deals:
             lines.append("（条件を満たすセールは見つかりませんでした）")
         else:
@@ -592,7 +603,7 @@ def main():
         lines.append(HASHTAG)
         texts = ["\n".join(lines)]
     else:
-        CHUNK = 50
+        CHUNK = 20  # ★変更: 50→20
         chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
         texts = [build_tweet_text(ch, is_last=(idx == len(chunks)-1))
                  for idx, ch in enumerate(chunks)]
