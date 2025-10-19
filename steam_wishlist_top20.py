@@ -309,7 +309,7 @@ def main():
     rows = sorted(prelim, key=lambda x: x["rank"])[:TOP_N]
 
     # 4) ツイート本文作成
-    head1 = f"🔜 未発売 × ウィッシュリストTop{TOP_N}"
+    head1 = f"🔜 未発売 × ウィッシュリストTOP{TOP_N}"
     head2 = f"（{today.strftime('%m/%d')} 現在 / JST）"
     lines = [head1, head2, ""]
 
@@ -348,3 +348,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
