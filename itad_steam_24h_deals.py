@@ -487,7 +487,7 @@ def main():
     end   = start + timedelta(days=1)
 
     # ★変更: 見出しをTOP20明記に
-    head1 = "⏰ 本日終了のSteamセールまとめ（TOP20・日本語レビュー数順）"
+    head1 = "⏰ 本日終了のSteamセールTOP20"
     head2 = f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）"
 
     # 1) deals
@@ -578,7 +578,7 @@ def main():
     # 6) 投稿テキスト構築（最大20件/ツイ） ← ★変更: コメント更新
     def build_tweet_text(chunk_rows, is_last):
         lines = [ 
-            "⏰ 本日終了のSteamセールまとめ（TOP20・日本語レビュー数順）",  # ★変更: 見出し
+            "⏰ 本日終了のSteamセールTOP20",  # ★変更: 見出し
             f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
             "" 
         ]
@@ -592,7 +592,7 @@ def main():
 
     if not rows:
         lines = [ 
-            "⏰ 本日終了のSteamセールまとめ（TOP20・日本語レビュー数順）",  # ★変更: 見出し
+            "⏰ 本日終了のSteamセールTOP20",  # ★変更: 見出し
             f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
             "" 
         ]
@@ -638,3 +638,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
