@@ -14,7 +14,7 @@ Steam: スクリプト実行時刻（JST）から24時間以内に終了予定�
       * レビュー評価%とラベル（/appreviews の全言語ベース）
       * ジャンル（最大2つ、日本語表記）
       * ITAD の lowest から「今回最安値です」判定
-  - TOP5件を抽出し、9:00 / 9:05 / 9:10 / 9:15 / 9:20 にそれぞれ個別ツイート
+  - TOP5件を抽出し、実行時刻から5分間隔で個別ツイート
   - 本文にはURLを含めず、ストアURLは各ツイートへの自己リプライに記載
   - 文面は絵文字控えめ（👇のみ）かつ情報重視
 
@@ -594,6 +594,9 @@ def main():
     start = datetime.now(JST)
     end = start + timedelta(hours=24)
 
+    # ★ このrunを識別するラベル（ツイート本文に入れて重複回避）
+    run_label = start.strftime("%Y/%m/%d %H:%M")
+
     # 1) deals 取得
     deals = list_steam_deals_expiring_window(start, end)
     t1 = time.time()
@@ -764,6 +767,7 @@ def main():
 
         lines = [
             "【24時間以内にセール終了】",
+            f"（{run_label} 時点）",
             name,
             f"価格: ¥{fmt_yen(initial)} → ¥{fmt_yen(final)}（-{off}%）",
             f"ジャンル: {genre_text}",
@@ -784,7 +788,7 @@ def main():
 
     def build_reply_text(entry):
         url = f"https://store.steampowered.com/app/{entry['appid']}/"
-        return f"ストアページ：\n{url}"
+        return f"ストアページ（{run_label} 時点）：\n{url}"
 
     # tweets = [{ "entry": dict, "main": str, "reply": Optional[str] }, ...]
     tweets = []
@@ -793,6 +797,7 @@ def main():
         # 対象がない場合は1ツイートだけ出す
         lines = [
             "【24時間以内にセール終了】",
+            f"（{run_label} 時点）",
             "",
         ]
         if not deals:
@@ -811,7 +816,7 @@ def main():
             })
 
     # ===== 投稿待機ロジック =====
-    # 9:00, 9:05, 9:10, ... のベースになる時刻
+    # 実行時刻をベースに 5分間隔で投下
     if POST_TO_X:
         base_target = datetime.now(JST)
         log(f"[DEFER] ベース投稿ターゲット: {base_target.strftime('%m/%d %H:%M:%S')} JST")
@@ -835,7 +840,7 @@ def main():
 
         total = len(tweets)
         for idx, tw in enumerate(tweets, 1):
-            # 9:00 + 5分*(idx-1) をターゲットにする
+            # 実行時刻 + 5分*(idx-1) をターゲットにする
             scheduled = base_target + timedelta(minutes=5 * (idx - 1))
             log(f"[DEFER] Tweet {idx}/{total} 用ターゲット: {scheduled.strftime('%m/%d %H:%M:%S')} JST")
             _sleep_until(scheduled)
