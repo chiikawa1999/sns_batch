@@ -765,7 +765,7 @@ def main():
         lowest_text = "今回最安値です" if entry.get("is_lowest") else ""
 
         lines = [
-            "【24時間以内にセール終了】",
+            "【本日のセール速報】",
             f"（{run_label} 時点）",
             name,
             f"価格: ¥{fmt_yen(initial)} → ¥{fmt_yen(final)}（-{off}%）",
@@ -859,4 +859,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
