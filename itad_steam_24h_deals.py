@@ -1,8 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 Steam: 実行日の朝9:00から翌朝9:00（JST）の24hで終了予定のセールを ITAD→Steam 連携で収集し、
-【日本語レビュー10件以上】の作品のみを整形し、投稿は「次に到来するJSTの9:00」まで待機してからX(旧Twitter)へ行います。
+【日本語レビュー10件以上】の作品のみを整形し、投稿は「次に到来するJSTの9:00」から
+5分間隔で TOP5 タイトルを個別ツイートします。
 （対象はソフト単体 = Steam app のみ。JPストア基準）
+
+仕様（このコード版）:
+  - 対象: 本日9:00〜翌日9:00(JST)にセール終了予定のSteamゲーム
+  - 日本語レビュー数が MIN_JP_REVIEWS 以上のゲームのみ
+  - ITAD / Steam APIから以下の情報を使用:
+      * 価格（元値・セール価格・割引率）
+      * 日本語レビュー件数（日本語のみ）
+      * レビュー評価%とラベル（/appreviews の全言語ベース）
+      * ジャンル（最大2つ、日本語表記）
+      * ITAD の lowest から「今回最安値です」判定
+  - TOP5件を抽出し、9:00 / 9:05 / 9:10 / 9:15 / 9:20 にそれぞれ個別ツイート
+  - 本文にはURLを含めず、ストアURLは各ツイートへの自己リプライに記載
+  - 文面は絵文字控えめ（👇のみ）かつ情報重視
 
 準備:
   1) pip install -r requirements.txt
@@ -10,7 +24,7 @@ Steam: 実行日の朝9:00から翌朝9:00（JST）の24hで終了予定のセ�
   3) 初回のみ X_REFRESH_TOKEN を GitHub Secrets へ設定（ローカル運用なら itad_x_tokens.jsonでも可）
 
 オプション:
-  - 環境変数 DEFER_OFFSET_SEC: 9:00 からの遅延秒（例: 10 を指定すると 9:00:10 に投稿）
+  - 環境変数 DEFER_OFFSET_SEC: 9:00 からの遅延秒（例: 10 を指定すると 9:00:10 に投稿開始）
 """
 
 import os
@@ -57,13 +71,14 @@ JP_REVIEW_WORKERS = 2
 ITAD_API_BASE = "https://api.isthereanydeal.com"
 
 # 9:00からの遅延秒（微調整用）
-DEFER_OFFSET_SEC = 0
+DEFER_OFFSET_SEC = int(os.getenv("DEFER_OFFSET_SEC", "0") or "0")
 
 # ログ
 DEBUG = True
 def ts(): return datetime.now(JST).strftime("%H:%M:%S")
 def log(msg):
-    if DEBUG: print(f"[{ts()}] {msg}")
+    if DEBUG:
+        print(f"[{ts()}] {msg}")
 
 # ====== バリデーション ======
 if not ITAD_API_KEY:
@@ -73,19 +88,23 @@ if not (X_CLIENT_ID and X_CLIENT_SECRET and X_REDIRECT_URI):
 
 # ====== パス ======
 def _base_dir():
-    try: return pathlib.Path(__file__).resolve().parent
-    except NameError: return pathlib.Path(os.getcwd())
+    try:
+        return pathlib.Path(__file__).resolve().parent
+    except NameError:
+        return pathlib.Path(os.getcwd())
 
 def _token_path():
     p = pathlib.Path(TOKEN_FILE)
-    if not p.is_absolute(): p = _base_dir() / p
+    if not p.is_absolute():
+        p = _base_dir() / p
     return p.resolve()
 
 # ====== refresh_token 読み/書き ======
 def _load_refresh_token():
     env_rt = (os.getenv("X_REFRESH_TOKEN") or "").strip()
     if env_rt:
-        if DEBUG: log("[TOKEN] Loaded refresh_token from ENV (X_REFRESH_TOKEN)")
+        if DEBUG:
+            log("[TOKEN] Loaded refresh_token from ENV (X_REFRESH_TOKEN)")
         return env_rt
 
     path = _token_path()
@@ -101,7 +120,8 @@ def _load_refresh_token():
         rt = (data.get("refresh_token") or "").strip()
         if not rt:
             raise RuntimeError(f"{path} に refresh_token がありません")
-        if DEBUG: log(f"[TOKEN] Loaded refresh_token from {path}")
+        if DEBUG:
+            log(f"[TOKEN] Loaded refresh_token from {path}")
         return rt
     except Exception as e:
         raise RuntimeError(
@@ -125,7 +145,8 @@ def _save_refresh_token(new_rt: str):
                 os.chmod(str(path), 0o600)
             except Exception:
                 pass
-            if DEBUG: log(f"[TOKEN] Saved refresh_token to {path}")
+            if DEBUG:
+                log(f"[TOKEN] Saved refresh_token to {path}")
         finally:
             try:
                 if os.path.exists(tmp):
@@ -133,14 +154,17 @@ def _save_refresh_token(new_rt: str):
             except Exception:
                 pass
     except Exception as e:
-        if DEBUG: log(f"[TOKEN] local save skipped: {type(e).__name__}: {e}")
+        if DEBUG:
+            log(f"[TOKEN] local save skipped: {type(e).__name__}: {e}")
     # (2) GHA用吐き出し
     if GHA_NEW_RT_PATH:
         try:
             pathlib.Path(GHA_NEW_RT_PATH).write_text(new_rt, encoding="utf-8")
-            if DEBUG: log(f"[TOKEN] Emitted new RT to {GHA_NEW_RT_PATH}")
+            if DEBUG:
+                log(f"[TOKEN] Emitted new RT to {GHA_NEW_RT_PATH}")
         except Exception as e:
-            if DEBUG: log(f"[TOKEN] emit to GHA_NEW_RT_PATH failed: {type(e).__name__}: {e}")
+            if DEBUG:
+                log(f"[TOKEN] emit to GHA_NEW_RT_PATH failed: {type(e).__name__}: {e}")
 
 # ====== HTTP セッション ======
 _session = requests.Session()
@@ -233,7 +257,7 @@ def get_steam_shop_id():
     for s in r.json():
         if (s.get("title") or "").lower() == "steam":
             return s.get("id")
-    return 61
+    return 61  # フォールバック
 
 def list_steam_deals_expiring_window(start, end):
     steam_shop_id = get_steam_shop_id()
@@ -257,12 +281,14 @@ def list_steam_deals_expiring_window(start, end):
                     },
                 )
                 data = r.json()
-                lst = [d for d in (data.get("list") or []) if (d.get("type") or "").lower() == "game"]
+                lst = [d for d in (data.get("list") or [])
+                       if (d.get("type") or "").lower() == "game"]
 
                 page_in, page_out = 0, 0
                 for d in lst:
                     expiry = (d.get("deal") or {}).get("expiry")
-                    if not expiry: continue
+                    if not expiry:
+                        continue
                     try:
                         exp_dt = dtparser.isoparse(expiry).astimezone(JST)
                     except Exception:
@@ -277,13 +303,16 @@ def list_steam_deals_expiring_window(start, end):
                 else:
                     too_far_pages = 0
                 if too_far_pages >= 3:
-                    used_sort = sort_key; break
+                    used_sort = sort_key
+                    break
 
                 if not data.get("hasMore"):
-                    used_sort = sort_key; break
+                    used_sort = sort_key
+                    break
                 offset = data.get("nextOffset", 0)
                 time.sleep(ITAD_SLEEP_SEC)
-            if used_sort: break
+            if used_sort:
+                break
         except requests.HTTPError:
             continue
 
@@ -298,7 +327,8 @@ def map_itad_ids_to_appids(itad_ids, steam_shop_id):
         r = post_with_key(f"{ITAD_API_BASE}/lookup/shop/{steam_shop_id}/id/v1", json_body=chunk)
         mapping = r.json() or {}
         for itad_id, ids in (mapping.items() if mapping else []):
-            if not ids: continue
+            if not ids:
+                continue
             for sid in ids:
                 if isinstance(sid, str) and sid.startswith("app/"):
                     try:
@@ -322,11 +352,13 @@ def steam_appdetails_batch(appids, cc="jp", lang="japanese"):
             j = _get_with_retry("https://store.steampowered.com/api/appdetails",
                                 params=params, kind="appdetails").json() or {}
             obj = j.get(str(aid))
-            if not obj: skipped.append((aid, "no-key-in-json")); continue
+            if not obj:
+                skipped.append((aid, "no-key-in-json")); continue
             if not obj.get("success"):
                 skipped.append((aid, "success:false (likely region/unavailable in JP)")); continue
             data = obj.get("data")
-            if not data: skipped.append((aid, "no-data-field")); continue
+            if not data:
+                skipped.append((aid, "no-data-field")); continue
             result[aid] = data
             _details_cache[aid] = data
         except requests.HTTPError as e:
@@ -376,10 +408,13 @@ def fetch_jp_reviews_parallel(appids):
     return results
 
 def fmt_yen(y):
-    try: return f"{int(y):,}"
-    except Exception: return str(y)
+    try:
+        return f"{int(y):,}"
+    except Exception:
+        return str(y)
 
 def compose_item_lines(entry):
+    # 旧形式で使っていたが、現在は1ツイート1作品形式に変更済み
     exp = entry.get("expiry_jst")
     exp_s = exp.strftime("%m/%d %H:%M") if exp else "不明"
     return [
@@ -388,6 +423,76 @@ def compose_item_lines(entry):
         f"⏳ 終了予定(JST): {exp_s}",
         f"🔗 https://store.steampowered.com/app/{entry['appid']}/",
     ]
+
+# ====== ジャンル日本語マップ ======
+GENRE_JA_MAP = {
+    "Action": "アクション",
+    "Adventure": "アドベンチャー",
+    "RPG": "RPG",
+    "Strategy": "ストラテジー",
+    "Simulation": "シミュレーション",
+    "Indie": "インディー",
+    "Casual": "カジュアル",
+    "Racing": "レース",
+    "Sports": "スポーツ",
+    "Survival": "サバイバル",
+    "Roguelike": "ローグライク",
+    "Roguelite": "ローグライク",
+    "Horror": "ホラー",
+    "Puzzle": "パズル",
+    "Shooter": "シューティング",
+    "FPS": "FPS",
+    "TPS": "TPS",
+    "Open World": "オープンワールド",
+    "Sandbox": "サンドボックス",
+    "Platformer": "プラットフォーマー",
+    "Fighting": "格闘",
+    "Visual Novel": "ビジュアルノベル",
+    "Music": "音楽",
+    "Turn-Based": "ターン制",
+    "JRPG": "JRPG",
+    "Tower Defense": "タワーディフェンス",
+}
+
+# ====== 評価%とラベルを /appreviews から取得 ======
+def _calc_review_score_from_appreviews(appid, language="all"):
+    """
+    Steamの /appreviews から全体評価%とラベルを取得する。
+    language="all" にしておくと全言語ベースの評価になる。
+    """
+    params = {
+        "json": 1,
+        "language": language,   # "all" or "japanese"
+        "purchase_type": "all",
+    }
+    try:
+        resp = _get_with_retry(
+            f"https://store.steampowered.com/appreviews/{appid}",
+            params=params,
+            kind="appreviews"
+        )
+        js = resp.json() or {}
+        q = js.get("query_summary", {}) or {}
+        pos = int(q.get("total_positive", 0) or 0)
+        neg = int(q.get("total_negative", 0) or 0)
+        total = pos + neg
+        if total <= 0:
+            return 0, "評価情報なし"
+
+        pct = int(round(pos / total * 100))
+
+        if pct >= 90:
+            label = "圧倒的に好評"
+        elif pct >= 80:
+            label = "非常に好評"
+        elif pct >= 70:
+            label = "好評"
+        else:
+            label = "賛否両論"
+
+        return pct, label
+    except Exception:
+        return 0, "評価情報なし"
 
 # ====== X: token & 投稿 ======
 def _x_refresh_access_token():
@@ -423,7 +528,8 @@ def _x_refresh_access_token():
             new_rt = js.get("refresh_token")
             if new_rt and new_rt != rt:
                 _save_refresh_token(new_rt)
-                if DEBUG: log("[TOKEN] refresh_token rotated")
+                if DEBUG:
+                    log("[TOKEN] refresh_token rotated")
             return access
 
         if 500 <= r.status_code < 600:
@@ -435,7 +541,7 @@ def _x_refresh_access_token():
         raise RuntimeError(f"X token refresh失敗 (Basic): 接続エラー {last}")
     raise RuntimeError(f"X token refresh失敗 (Basic, 5xx継続): {getattr(last,'status_code','N/A')} {getattr(last,'text','')[:300]}")
 
-def _x_create_tweet(text, bearer=None, reply_to=None):
+def _x_create_tweet(text, bearer=None, reply_to=None, media_ids=None):
     if bearer is None:
         bearer = _x_refresh_access_token()
     url = "https://api.twitter.com/2/tweets"
@@ -443,6 +549,9 @@ def _x_create_tweet(text, bearer=None, reply_to=None):
     payload = {"text": text}
     if reply_to:
         payload["reply"] = {"in_reply_to_tweet_id": str(reply_to)}
+    if media_ids:
+        payload["media"] = {"media_ids": [str(m) for m in media_ids]}
+
     r = requests.post(url, headers=headers, json=payload, timeout=60)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"X投稿失敗 ({r.status_code}): {r.text[:400]}")
@@ -486,11 +595,7 @@ def main():
     start = datetime(today.year, today.month, today.day, 9, 0, 0, tzinfo=JST)
     end   = start + timedelta(days=1)
 
-    # ★変更: 見出しをTOP20明記に
-    head1 = "⏰ 本日終了のSteamセールTOP20"
-    head2 = f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）"
-
-    # 1) deals
+    # 1) deals 取得
     deals = list_steam_deals_expiring_window(start, end)
     t1 = time.time()
 
@@ -511,40 +616,54 @@ def main():
     # 4) 日本価格のある game のみ抽出
     prelim, seen = [], set()
     for appid in target_appids:
-        if appid in seen: continue
+        if appid in seen:
+            continue
         seen.add(appid)
         data = details_map.get(appid)
-        if not data: continue
-        if (data.get("type") or "").lower() != "game": continue
+        if not data:
+            continue
+        if (data.get("type") or "").lower() != "game":
+            continue
         po = data.get("price_overview") or {}
         is_free = bool(data.get("is_free", False))
         if is_free:
-            initial = final = 0; off = 0
+            initial = final = 0
+            off = 0
         else:
-            if not po: continue
+            if not po:
+                continue
             initial = (po.get("initial") or 0) // 100
             final   = (po.get("final")   or 0) // 100
             off     = po.get("discount_percent") or 0
-        prelim.append({"appid": appid, "name": data.get("name", f"App {appid}"),
-                       "initial": initial, "final": final, "off": off, "expiry_jst": None})
+        prelim.append({
+            "appid": appid,
+            "name": data.get("name", f"App {appid}"),
+            "initial": initial,
+            "final": final,
+            "off": off,
+            "expiry_jst": None,
+        })
 
     # expiry 紐付け（JST）
     itad_expiry_map = {}
     for d in deals:
         expiry = (d.get("deal") or {}).get("expiry")
-        if not expiry: continue
+        if not expiry:
+            continue
         try:
             itad_expiry_map[d["id"]] = dtparser.isoparse(expiry).astimezone(JST)
         except Exception:
             pass
+
     for d in prelim:
         for itad_id, appid in id2appid.items():
             if appid == d["appid"] and itad_id in itad_expiry_map:
-                d["expiry_jst"] = itad_expiry_map[itad_id]; break
+                d["expiry_jst"] = itad_expiry_map[itad_id]
+                break
     if target_appids:
         t4 = time.time()
 
-    # 5) 日本語レビュー >= 10
+    # 5) 日本語レビュー >= MIN_JP_REVIEWS
     appids_for_reviews = [p["appid"] for p in prelim]
     jp_map = fetch_jp_reviews_parallel(appids_for_reviews) if appids_for_reviews else {}
     rows = []
@@ -556,16 +675,69 @@ def main():
 
     def expiry_key(dt): return (0, dt.timestamp()) if dt else (1, float("inf"))
 
-    # 既存の並び替え
-    rows.sort(key=lambda x: (-x.get("reviews_jp", 0), -x["off"], expiry_key(x["expiry_jst"]), x["final"], x["name"]))
+    # 並び替え: レビュー数, 割引率, 終了時刻, 価格, 名前
+    rows.sort(
+        key=lambda x: (
+            -x.get("reviews_jp", 0),
+            -x["off"],
+            expiry_key(x["expiry_jst"]),
+            x["final"],
+            x["name"],
+        )
+    )
     if target_appids:
         t5 = time.time()
 
-    # ★変更: TOP20件に制限
-    TOP_N = 20
+    # ===== ここからツイート用の追加情報を付与 =====
+
+    # ★ TOP5件に制限
+    TOP_N = 5
     rows = rows[:TOP_N]
 
-    # プロファイル
+    # レビュー評価%とラベル（/appreviews から取得）
+    for item in rows:
+        pct, label = _calc_review_score_from_appreviews(item["appid"], language="all")
+        item["review_percent"] = pct
+        item["review_label"] = label
+
+    # ジャンル（日本語, 最大2つ）
+    for item in rows:
+        data = details_map.get(item["appid"], {}) or {}
+        genres = data.get("genres") or []
+        names_en = [g.get("description") for g in genres if g.get("description")]
+        names_ja = []
+        for g in names_en:
+            if g in GENRE_JA_MAP:
+                names_ja.append(GENRE_JA_MAP[g])
+            else:
+                names_ja.append(g)
+        item["genres"] = " / ".join(names_ja[:2]) if names_ja else "ジャンル情報なし"
+
+    # ITAD lowest から最安値判定
+    itad_lowest_map = {}
+    for d in deals:
+        did = d.get("id")
+        deal = d.get("deal") or {}
+        low = deal.get("lowest") or {}
+        price = low.get("price")
+        if did and price is not None:
+            try:
+                itad_lowest_map[did] = int(round(float(price)))
+            except Exception:
+                continue
+
+    for item in rows:
+        item["lowest"] = None
+        item["is_lowest"] = False
+        for itad_id, appid in id2appid.items():
+            if appid == item["appid"] and itad_id in itad_lowest_map:
+                lowest = itad_lowest_map[itad_id]
+                item["lowest"] = lowest
+                if lowest and item["final"] == lowest:
+                    item["is_lowest"] = True
+                break
+
+    # プロファイルログ
     profile_parts = []
     if t1 is not None: profile_parts.append(f"deals:{t1 - t0:.1f}s")
     if t2 is not None: profile_parts.append(f"map:{t2 - t1:.1f}s")
@@ -575,67 +747,113 @@ def main():
     if profile_parts:
         log("PROFILE " + " ".join(profile_parts))
 
-    # 6) 投稿テキスト構築（最大20件/ツイ） ← ★変更: コメント更新
-    def build_tweet_text(chunk_rows, is_last):
-        lines = [ 
-            "⏰ 本日終了のSteamセールTOP20",  # ★変更: 見出し
-            f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
-            "" 
+    # ===== ツイート本文＆リプテキスト構築 =====
+
+    def build_main_tweet(entry):
+        name = entry["name"]
+        initial = entry["initial"]
+        final = entry["final"]
+        off = entry["off"]
+
+        reviews_jp = entry.get("reviews_jp", 0)
+        genre_text = entry.get("genres", "ジャンル情報なし")
+
+        pct = entry.get("review_percent", 0)
+        label = entry.get("review_label", "評価情報なし")
+
+        lowest_text = "今回最安値です" if entry.get("is_lowest") else ""
+
+        lines = [
+            "【24時間以内にセール終了】",
+            name,
+            f"価格: ¥{fmt_yen(initial)} → ¥{fmt_yen(final)}（-{off}%）",
+            f"ジャンル: {genre_text}",
+            f"評価: {label}（{pct}%）",
+            f"日本語レビュー: {reviews_jp}件",
         ]
-        for r in chunk_rows:
-            lines.extend(compose_item_lines(r))
-            lines.append("")
-        lines.append(HASHTAG)
-        if not is_last:
-            lines.append("続きます↓")
+
+        if lowest_text:
+            lines.append(lowest_text)
+
+        lines.extend([
+            "",
+            "ストアページ案内はリプ欄から👇",
+            HASHTAG,
+        ])
+
         return "\n".join(lines)
 
+    def build_reply_text(entry):
+        url = f"https://store.steampowered.com/app/{entry['appid']}/"
+        return f"ストアページ：\n{url}"
+
+    # tweets = [{ "entry": dict, "main": str, "reply": Optional[str] }, ...]
+    tweets = []
+
     if not rows:
-        lines = [ 
-            "⏰ 本日終了のSteamセールTOP20",  # ★変更: 見出し
+        # 対象がない場合は1ツイートだけ出す
+        lines = [
+            "【24時間以内にセール終了】",
             f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
-            "" 
+            "",
         ]
         if not deals:
-            lines.append("（条件を満たすセールは見つかりませんでした）")
+            lines.append("条件を満たすセールは見つかりませんでした。")
         else:
-            lines.append("該当ディールはありましたが、Steam側のappid解決に失敗しました。")
+            lines.append("該当ディールはありましたが、Steam側のappid解決またはレビュー条件を満たしませんでした。")
+        lines.append("")
         lines.append(HASHTAG)
-        texts = ["\n".join(lines)]
+        tweets.append({"entry": None, "main": "\n".join(lines), "reply": None})
     else:
-        CHUNK = 20  # ★変更: 50→20
-        chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
-        texts = [build_tweet_text(ch, is_last=(idx == len(chunks)-1))
-                 for idx, ch in enumerate(chunks)]
+        for entry in rows:
+            tweets.append({
+                "entry": entry,
+                "main": build_main_tweet(entry),
+                "reply": build_reply_text(entry),
+            })
 
-    # ===== ここから投稿待機ロジック =====
-    target = _next_9am_jst(datetime.now(JST))
-    log(f"[DEFER] 次の投稿ターゲット: {target.strftime('%m/%d %H:%M:%S')} JST")
+    # ===== 投稿待機ロジック =====
+    # 9:00, 9:05, 9:10, ... のベースになる時刻
     if POST_TO_X:
-        _sleep_until(target)
+        base_target = _next_9am_jst(datetime.now(JST))
+        log(f"[DEFER] ベース投稿ターゲット: {base_target.strftime('%m/%d %H:%M:%S')} JST")
+    else:
+        base_target = None
 
     # ===== 投稿（待機後に実施） =====
     if not POST_TO_X:
         # プレビュー出力
-        for i, t in enumerate(texts, 1):
-            print(f"--- Tweet Part {i}/{len(texts)} ---")
-            print(t)
+        for i, tw in enumerate(tweets, 1):
+            print(f"--- Tweet {i} main ---")
+            print(tw["main"])
+            if tw["reply"]:
+                print(f"--- Tweet {i} reply ---")
+                print(tw["reply"])
         return
 
     try:
         print("[POST] Xへ投稿を開始します…")
-        bearer = _x_refresh_access_token()  # ※待機後にリフレッシュ（有効性を担保）
-        first_id = _x_create_tweet(texts[0], bearer=bearer)
-        print(f"[POST] 1/{len(texts)} 完了: tweet_id={first_id}, URL=https://x.com/i/web/status/{first_id}")
+        bearer = _x_refresh_access_token()  # ※投稿前にアクセストークン取得
 
-        prev_id = first_id
-        for i in range(1, len(texts)):
-            tid = _x_create_tweet(texts[i], bearer=bearer, reply_to=prev_id)
-            print(f"[POST] {i+1}/{len(texts)} 完了: tweet_id={tid}, URL=https://x.com/i/web/status/{tid}")
-            prev_id = tid
+        total = len(tweets)
+        for idx, tw in enumerate(tweets, 1):
+            # 9:00 + 5分*(idx-1) をターゲットにする
+            scheduled = base_target + timedelta(minutes=5 * (idx - 1))
+            log(f"[DEFER] Tweet {idx}/{total} 用ターゲット: {scheduled.strftime('%m/%d %H:%M:%S')} JST")
+            _sleep_until(scheduled)
+
+            # 本文ツイート
+            main_id = _x_create_tweet(tw["main"], bearer=bearer)
+            print(f"[POST] main {idx}/{total} 完了: tweet_id={main_id}, URL=https://x.com/i/web/status/{main_id}")
+
+            # URLリプ（ある場合のみ）
+            if tw["reply"]:
+                reply_id = _x_create_tweet(tw["reply"], bearer=bearer, reply_to=main_id)
+                print(f"[POST] reply {idx}/{total} 完了: tweet_id={reply_id}, URL=https://x.com/i/web/status/{reply_id}")
+
     except Exception as e:
-        print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr); sys.exit(1)
+        print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
