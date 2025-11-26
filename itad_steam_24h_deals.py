@@ -815,8 +815,8 @@ def main():
     # ===== 投稿待機ロジック =====
     # 9:00, 9:05, 9:10, ... のベースになる時刻
     if POST_TO_X:
-        # base_target = _next_9am_jst(datetime.now(JST))
-        base_target = datetime.now(JST)
+        base_target = _next_9am_jst(datetime.now(JST))
+        # base_target = datetime.now(JST)
         log(f"[DEFER] ベース投稿ターゲット: {base_target.strftime('%m/%d %H:%M:%S')} JST")
     else:
         base_target = None
@@ -858,4 +858,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
