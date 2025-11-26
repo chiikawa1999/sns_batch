@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Steam: 実行日の朝9:00から翌朝9:00（JST）の24hで終了予定のセールを ITAD→Steam 連携で収集し、
+Steam: スクリプト実行時刻（JST）から24時間以内に終了予定のセールを ITAD→Steam 連携で収集し、
 【日本語レビュー10件以上】の作品のみを整形し、投稿は「次に到来するJSTの9:00」から
 5分間隔で TOP5 タイトルを個別ツイートします。
 （対象はソフト単体 = Steam app のみ。JPストア基準）
 
 仕様（このコード版）:
-  - 対象: 本日9:00〜翌日9:00(JST)にセール終了予定のSteamゲーム
+  - 対象: 「実行した瞬間〜24時間後」(JST) にセール終了予定のSteamゲーム
   - 日本語レビュー数が MIN_JP_REVIEWS 以上のゲームのみ
   - ITAD / Steam APIから以下の情報を使用:
       * 価格（元値・セール価格・割引率）
@@ -590,10 +590,9 @@ def main():
     t0 = time.time()
     t1 = t2 = t3 = t4 = t5 = None
 
-    # 「本日9:00 → 翌日9:00（JST）」の窓
-    today = datetime.now(JST).date()
-    start = datetime(today.year, today.month, today.day, 9, 0, 0, tzinfo=JST)
-    end   = start + timedelta(days=1)
+    # ★ 起動時刻(JST) → 24時間後までの窓
+    start = datetime.now(JST)
+    end = start + timedelta(hours=24)
 
     # 1) deals 取得
     deals = list_steam_deals_expiring_window(start, end)
@@ -794,7 +793,6 @@ def main():
         # 対象がない場合は1ツイートだけ出す
         lines = [
             "【24時間以内にセール終了】",
-            f"（{start.strftime('%m/%d %H:%M')} → {end.strftime('%m/%d %H:%M')} JST）",
             "",
         ]
         if not deals:
@@ -815,8 +813,7 @@ def main():
     # ===== 投稿待機ロジック =====
     # 9:00, 9:05, 9:10, ... のベースになる時刻
     if POST_TO_X:
-        base_target = _next_9am_jst(datetime.now(JST))
-        # base_target = datetime.now(JST)
+        base_target = datetime.now(JST)
         log(f"[DEFER] ベース投稿ターゲット: {base_target.strftime('%m/%d %H:%M:%S')} JST")
     else:
         base_target = None
@@ -858,5 +855,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
